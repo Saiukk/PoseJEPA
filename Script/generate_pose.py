@@ -3,8 +3,9 @@ Genera render sintetici di oggetti BOP da pose campionate uniformemente su SO(3)
 e salva la ground-truth (rotazione + traslazione) in un CSV.
 """
 import os
+os.environ["CUDA_VISIBLE_DEVICES"] = "0" 
 os.environ["PYOPENGL_PLATFORM"] = "egl"
-os.environ["CUDA_VISIBLE_DEVICES"] = "0"  
+ 
 
 import sys
 sys.path.append("/Experiments/riccardop02")  
@@ -18,7 +19,7 @@ from scipy.spatial.transform import Rotation
 from JEPA.Essential.path import models_dir, RENDERS
 
 # ----------------------------- CONFIG -----------------------------
-DATASET_NAME = "icbin"
+DATASET_NAME = "xyzibd"
 OBJECT       = "all"      # "all" = tutti gli obj_*.ply, oppure "obj_000001" / "1"
 POSES_NUMBER = 10
 IMG_SIZE     = 224        # 14 * 16 -> pronto per DINOv2
@@ -27,7 +28,7 @@ FILL         = 1.6        # quanto "stretto" sta l'oggetto nel frame (>1 = piu' 
 BG_GRAY      = 0.5        # sfondo grigio neutro
 SEED         = 0
 MODE         = "rot"    # "rot" = solo rotazione | "trans" = solo traslazione | "both" = entrambe
-ROT_AXIS     = "all"      # "all", "x", "y", "z" 
+ROT_AXIS     = "y"      # "all", "x", "y", "z" 
 TRANS_FRAC = 0.15     # ampiezza max di tx,ty 
 DEPTH_FRAC = 0.25     # variazione max di tz 
 # ------------------------------------------------------------------
@@ -115,7 +116,7 @@ def render_object(mesh_path, rotations, off_xy, off_z, renderer, csv_writer, dat
         tx = off_xy[i, 0] * half_extent
         ty = off_xy[i, 1] * half_extent
         tz = -dist * (1.0 + off_z[i])
-        T[:3,  3] = [0.0, 0.0, -dist]      # davanti alla camera
+        T[:3,  3] = [tx, ty, tz]      # davanti alla camera
         scene.set_pose(obj_node, T)
 
         color, _ = renderer.render(scene)  # color: HxWx3 uint8
@@ -142,6 +143,10 @@ def render_object(mesh_path, rotations, off_xy, off_z, renderer, csv_writer, dat
 
 
 def main():
+
+    import torch
+    print("GPU corrente:", torch.cuda.current_device())
+
     obj_paths = get_object_paths(DATASET_NAME, OBJECT)
     
     # GENERARE UNA POSA
