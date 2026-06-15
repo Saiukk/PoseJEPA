@@ -20,13 +20,14 @@ from JEPA.Essential.path import models_dir, RENDERS
 # ----------------------------- CONFIG -----------------------------
 DATASET_NAME = "icbin"
 OBJECT       = "all"      # "all" = tutti gli obj_*.ply, oppure "obj_000001" / "1"
-POSES_NUMBER = 5
+POSES_NUMBER = 10
 IMG_SIZE     = 224        # 14 * 16 -> pronto per DINOv2
 YFOV         = np.pi / 4  # campo visivo verticale
 FILL         = 1.6        # quanto "stretto" sta l'oggetto nel frame (>1 = piu' margine)
 BG_GRAY      = 0.5        # sfondo grigio neutro
 SEED         = 0
-MODE       = "rot"    # "rot" = solo rotazione | "trans" = solo traslazione | "both" = entrambe
+MODE         = "rot"    # "rot" = solo rotazione | "trans" = solo traslazione | "both" = entrambe
+ROT_AXIS     = "all"      # "all", "x", "y", "z" 
 TRANS_FRAC = 0.15     # ampiezza max di tx,ty 
 DEPTH_FRAC = 0.25     # variazione max di tz 
 # ------------------------------------------------------------------
@@ -52,9 +53,16 @@ def add_raymond_lights(scene):
         scene.add(pyrender.DirectionalLight(color=np.ones(3), intensity=2.5), pose=pose)
 
 
-def sample_poses(n, seed=0):
-    """n rotazioni uniformi su SO(3) (misura di Haar -> davvero 'dappertutto')."""
-    return Rotation.random(n, random_state=seed)
+def sample_poses(n, axis = "all", seed=0):
+    """n rotazioni uniformi su SO(3)"""
+    if axis in ("x", "y", "z"):
+        # angoli equispaziati su tutto il giro, endpoint escluso -> nessun doppione
+        angles = np.linspace(0.0, 360.0, n, endpoint=False).reshape(-1, 1)
+        return Rotation.from_euler(axis, angles, degrees=True)
+    elif axis == "all":
+        return Rotation.random(n, random_state=seed)
+    else:
+        raise ValueError(f"axis non valido: {axis}")
 
 
 # Taken the object
@@ -111,7 +119,12 @@ def render_object(mesh_path, rotations, off_xy, off_z, renderer, csv_writer, dat
         scene.set_pose(obj_node, T)
 
         color, _ = renderer.render(scene)  # color: HxWx3 uint8
-        img_name = f"{obj_name}_pose{i:04d}.png"
+        rx, ry, rz = R.as_euler("xyz", degrees=True)
+        img_name = (
+            f"{obj_name}_pose{i:04d}"
+            f"_rx{rx:+04.0f}_ry{ry:+04.0f}_rz{rz:+04.0f}"
+            f"_tx{tx:+04.0f}_ty{ty:+04.0f}_tz{tz:+04.0f}.png"
+        )
         trimesh.util.log.disabled = True
         from PIL import Image
         Image.fromarray(color).save(out_dir / img_name)
@@ -136,7 +149,7 @@ def main():
 
     # rotazioni: variano in "rot"/"both", restano identità in "trans"
     if MODE in ("rot", "both"):
-        rotations = sample_poses(POSES_NUMBER, seed=SEED)
+        rotations = sample_poses(POSES_NUMBER, axis=ROT_AXIS, seed=SEED)
     else:
         rotations = Rotation.identity(POSES_NUMBER)
 
