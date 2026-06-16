@@ -19,7 +19,7 @@ from scipy.spatial.transform import Rotation
 from JEPA.Essential.path import models_dir, RENDERS
 
 # ----------------------------- CONFIG -----------------------------
-DATASET_NAME = "ycbv"
+DATASET_NAME = "xyzibd"
 OBJECT       = "all"      # "all" = tutti gli obj_*.ply, oppure "obj_000001" / "1"
 POSES_NUMBER = 72
 IMG_SIZE     = 224        # 14 * 16 -> pronto per DINOv2
