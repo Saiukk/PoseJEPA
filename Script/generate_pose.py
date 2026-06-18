@@ -20,17 +20,17 @@ from JEPA.Essential.path import models_dir, RENDERS
 
 # ----------------------------- CONFIG -----------------------------
 DATASET_NAME = "ycbv"
-OBJECT       = "20"      # "all" = tutti gli obj_*.ply, oppure "obj_000001" / "1"
-POSES_NUMBER = 400
+OBJECT       = "all"      # "all" = tutti gli obj_*.ply, oppure "obj_000001" / "1"
+POSES_NUMBER = 72
 IMG_SIZE     = 224        # 14 * 16 -> pronto per DINOv2
 YFOV         = np.pi / 4  # campo visivo verticale
-FILL         = 1.6        # quanto "stretto" sta l'oggetto nel frame (>1 = piu' margine)
+FILL         = 2        # quanto "stretto" sta l'oggetto nel frame (>1 = piu' margine)
 BG_GRAY      = 0.5        # sfondo grigio neutro
 SEED         = 0
 MODE         = "rot"    # "rot" = solo rotazione | "trans" = solo traslazione | "both" = entrambe
 ROT_AXIS     = "all"      # "all", "x", "y", "z" 
-TRANS_FRAC = 0.15     # ampiezza max di tx,ty 
-DEPTH_FRAC = 0.25     # variazione max di tz 
+TRANS_FRAC = 0.30     # ampiezza max di tx,ty 
+DEPTH_FRAC = 0.20    # variazione max di tz 
 # ------------------------------------------------------------------
 
 
@@ -89,7 +89,7 @@ def get_object_paths(dataset, obj):
 def render_object(mesh_path, rotations, off_xy, off_z, renderer, csv_writer, dataset):
     """Renderizza un oggetto da tutte le pose e appende le GT al CSV."""
     obj_name = mesh_path.stem                      # es. "obj_000001"
-    out_dir  = RENDERS / dataset 
+    out_dir  = RENDERS / dataset
     out_dir.mkdir(parents=True, exist_ok=True)
 
     # carica + centra la mesh sull'origine (rotazione attorno al suo centro)
