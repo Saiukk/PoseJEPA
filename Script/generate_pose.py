@@ -19,7 +19,7 @@ from scipy.spatial.transform import Rotation
 from JEPA.Essential.path import models_dir, RENDERS
 
 # ----------------------------- CONFIG -----------------------------
-DATASET_NAME = "ycbv"
+DATASET_NAME = "tless"
 OBJECT       = "all"      # "all" = tutti gli obj_*.ply, oppure "obj_000001" / "1"
 POSES_NUMBER = 200
 IMG_SIZE     = 224        # 14 * 16 -> pronto per DINOv2
@@ -27,8 +27,8 @@ YFOV         = np.pi / 4  # campo visivo verticale
 FILL         = 2        # quanto "stretto" sta l'oggetto nel frame (>1 = piu' margine)
 BG_GRAY      = 0.5        # sfondo grigio neutro
 SEED         = 0
-MODE         = "trans"    # "rot" = solo rotazione | "trans" = solo traslazione | "both" = entrambe
-ROT_AXIS     = "all"      # "all", "x", "y", "z" 
+MODE         = "rot"    # "rot" = solo rotazione | "trans" = solo traslazione | "both" = entrambe
+ROT_AXIS     = "y"      # "all", "x", "y", "z" 
 TRANS_FRAC = 0.30     # ampiezza max di tx,ty 
 DEPTH_FRAC = 0.20    # variazione max di tz 
 # ------------------------------------------------------------------
