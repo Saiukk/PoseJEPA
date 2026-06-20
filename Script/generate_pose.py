@@ -19,9 +19,9 @@ from scipy.spatial.transform import Rotation
 from JEPA.Essential.path import models_dir, RENDERS
 
 # ----------------------------- CONFIG -----------------------------
-DATASET_NAME = "tless"
+DATASET_NAME = "icbin"
 OBJECT       = "all"      # "all" = tutti gli obj_*.ply, oppure "obj_000001" / "1"
-POSES_NUMBER = 200
+POSES_NUMBER = 72
 IMG_SIZE     = 224        # 14 * 16 -> pronto per DINOv2
 YFOV         = np.pi / 4  # campo visivo verticale
 FILL         = 2        # quanto "stretto" sta l'oggetto nel frame (>1 = piu' margine)
@@ -89,7 +89,7 @@ def get_object_paths(dataset, obj):
 def render_object(mesh_path, rotations, off_xy, off_z, renderer, csv_writer, dataset):
     """Renderizza un oggetto da tutte le pose e appende le GT al CSV."""
     obj_name = mesh_path.stem                      # es. "obj_000001"
-    out_dir  = RENDERS / f"{dataset}_translation"
+    out_dir  = RENDERS / f"{dataset}_rotation"
     out_dir.mkdir(parents=True, exist_ok=True)
 
     # carica + centra la mesh sull'origine (rotazione attorno al suo centro)
@@ -167,7 +167,7 @@ def main():
         off_z  = np.zeros(POSES_NUMBER)
 
 
-    csv_path = RENDERS / f"{DATASET_NAME}_translation" / "gt_poses.csv"
+    csv_path = RENDERS / f"{DATASET_NAME}_rotation" / "gt_poses.csv"
     csv_path.parent.mkdir(parents=True, exist_ok=True)
     new_file = not csv_path.exists()
 
