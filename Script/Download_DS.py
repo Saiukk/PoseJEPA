@@ -4,12 +4,14 @@ from huggingface_hub import snapshot_download
 # Abilita il trasferimento ultra-veloce
 os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
 
-print("download of T-LESS ...")
+NAME = "lmo"
+
+print(f"download of {NAME} ...")
 
 snapshot_download(
-    repo_id="bop-benchmark/tless",
+    repo_id=f"bop-benchmark/{NAME}",
     repo_type="dataset",
-    local_dir="/Experiments/riccardop02/datasets/tless",
+    local_dir=f"/Experiments/riccardop02/datasets/{NAME}",
     
     allow_patterns=[
             "*base.zip", 
