@@ -1,10 +1,10 @@
 import os
 from huggingface_hub import snapshot_download
 
-# Abilita il trasferimento ultra-veloce
+
 os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
 
-NAME = "lmo"
+NAME = "hb"
 
 print(f"download of {NAME} ...")
 
@@ -14,9 +14,10 @@ snapshot_download(
     local_dir=f"/Experiments/riccardop02/datasets/{NAME}",
     
     allow_patterns=[
-            "*base.zip", 
-            "*models*.zip", 
-            "*test*.zip"
+            # "*base.zip", 
+            # "*models*.zip", 
+            # "*test*.zip"
+            "hb_val_pri*"
         ]
 )
 
