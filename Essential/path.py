@@ -23,8 +23,9 @@ DETECTION_REGISTRY = {
     }
 }
 
+
 def get_registered_detection(method: str, name: str, split: str) -> Path:
-    """Recupera dinamicamente il file di detection dal registro incrociando metodo e dataset."""
+    """Obtain file of a detection"""
     
     if method not in DETECTION_REGISTRY:
         available_methods = list(DETECTION_REGISTRY.keys())
@@ -33,7 +34,6 @@ def get_registered_detection(method: str, name: str, split: str) -> Path:
             f"Available: {available_methods}"
         )
         
-
     dataset_key = f"{name}_{split}"
     if dataset_key not in DETECTION_REGISTRY[method]:
         available_datasets = list(DETECTION_REGISTRY[method].keys())
