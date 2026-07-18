@@ -5,8 +5,10 @@ from huggingface_hub import hf_hub_download
 os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
 
 REPO_ID = "bop-benchmark/bop_extra" 
-FILE_PATH = "default_detections/classic_bop23_model_based_unseen/cnos-fastsam/cnos-fastsam_ycbv-test_f4f2127c-6f59-447c-95b3-28e1e591f1a1.json"
+FILE_PATH = "default_detections/classic_bop23_model_based_unseen/cnos-fastsam/cnos-fastsam_tless-test_8ca61cb0-4472-4f11-bce7-1362a12d396f.json"
 DESTINATION_DIR = "/Experiments/riccardop02/detection/cnos/"
+
+
 
 print(f"Download di {FILE_PATH} dal repo {REPO_ID} ...")
 

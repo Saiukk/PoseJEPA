@@ -20,6 +20,7 @@ DETECTION_REGISTRY = {
     "cnos": {
         "ycbv_test": "cnos-fastsam_ycbv-test_f4f2127c-6f59-447c-95b3-28e1e591f1a1.json",
         "hb_test_primesense": "cnos-fastsam_hb-test_db836947-020a-45bd-8ec5-c95560b68011.json",
+        "tless_test_primesense": "cnos-fastsam_tless-test_8ca61cb0-4472-4f11-bce7-1362a12d396f.json",
     }
 }
 
