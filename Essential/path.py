@@ -6,10 +6,12 @@ Le funzioni prendono il NOME del dataset come parametro: valgono per qualsiasi d
 from pathlib import Path
 
 # --- radici (assolute, sul server) ---
-DATA       = Path("/Experiments/riccardop02/datasets")        # dataset BOP (sola lettura)
-OUTPUTS    = Path("/Experiments/riccardop02/JEPA/Renders")    # output rigenerabili
-RENDERS    = OUTPUTS / "renders"
-DETECTIONS = Path("/Experiments/riccardop02/detection")       # detection (cnos, ...)
+DATA       = Path("/data/riccardop02/datasets")        # dataset BOP (sola lettura)
+#OUTPUTS    = Path("/data/riccardop02/JEPA/")    # output rigenerabili
+RENDERS    = Path("/data/riccardop02/renders")
+DETECTIONS = Path("/data/riccardop02/detection")       # detection (cnos, ...)
+OUTPUT     = Path("/experiments/riccardop02/")
+
 
 RENDERS.mkdir(parents=True, exist_ok=True)
 
@@ -20,7 +22,7 @@ DETECTION_REGISTRY = {
     "cnos": {
         "ycbv_test": "cnos-fastsam_ycbv-test_f4f2127c-6f59-447c-95b3-28e1e591f1a1.json",
         "hb_test_primesense": "cnos-fastsam_hb-test_db836947-020a-45bd-8ec5-c95560b68011.json",
-        "tless_test_primesense": "cnos-fastsam_tless-test_8ca61cb0-4472-4f11-bce7-1362a12d396f.json",
+        "tless_test_primesense": "cnos-fastsams_tless-test_8ca61cb0-4472-4f11-bce7-1362a12d396f.json",
     }
 }
 
