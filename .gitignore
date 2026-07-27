@@ -1,2 +1,14 @@
-Renders/
 .env
+.vscode/
+
+# Models
+*.pt
+*.pth
+*.ckpt
+
+# Hydra e Logging 
+outputs/
+multirun/
+wandb/
+tensorboard/
+*.log

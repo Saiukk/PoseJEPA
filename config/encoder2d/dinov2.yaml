@@ -1,0 +1,10 @@
+_target_: src.models.encoder2d.DINOv2
+
+# Define other variables..
+model_name: "facebook/dinov2-base"
+layers: [-1]
+token: "ptc"
+normalize: True
+freeze: True
+
+

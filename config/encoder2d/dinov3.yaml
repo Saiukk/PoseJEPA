@@ -1,0 +1,3 @@
+_target_: src.models.encoder2d.DINOv3
+
+# Define other variables..
