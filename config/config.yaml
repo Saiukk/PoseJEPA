@@ -1,6 +1,0 @@
-defaults:
-  - encoder2d: dinov2
-  - encoder3d: uni3d
-  - Predictor: transformer
-
-  

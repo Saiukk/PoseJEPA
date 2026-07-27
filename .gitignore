@@ -12,3 +12,7 @@ multirun/
 wandb/
 tensorboard/
 *.log
+
+
+# Temporary files
+prova.py

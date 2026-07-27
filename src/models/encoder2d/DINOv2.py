@@ -10,7 +10,7 @@ class DINOv2(BaseEncoder2D):
     def __init__(
         self,
         model_name: str = "facebook/dinov2-base",
-        layers: list = [-1],
+        layers: list = None,
         token: str = "ptc",
         normalize: bool = True,
         freeze: bool = True,
