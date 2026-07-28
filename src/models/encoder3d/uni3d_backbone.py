@@ -1,7 +1,10 @@
+## CODE FROM UNI3D https://github.com/baaivision/Uni3D
+
 import torch
 import torch.nn as nn
 from pointnet2_ops import pointnet2_utils
-
+import timm
+import numpy as np
 import logging
 
 def fps(data, number):
@@ -164,7 +167,7 @@ class Encoder(nn.Module):
 class PointcloudEncoder(nn.Module):
     def __init__(self, point_transformer, args):
         super().__init__()
-        from easydict import EasyDict
+        #from easydict import EasyDict
         self.trans_dim = args.pc_feat_dim # 768
         self.embed_dim = args.embed_dim # 512
         self.group_size = args.group_size # 32
@@ -225,3 +228,35 @@ class PointcloudEncoder(nn.Module):
 
         x = self.trans2embed(x)
         return x
+
+
+
+
+# class Uni3D(nn.Module):
+#     def __init__(self, point_encoder):
+#         super().__init__()
+#         self.logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
+#         self.point_encoder = point_encoder
+
+#     def encode_pc(self, pc):
+#         xyz = pc[:,:,:3].contiguous()
+#         color = pc[:,:,3:].contiguous()
+#         pc_feat = self.point_encoder(xyz, color)
+#         return pc_feat
+
+
+
+# def get_metric_names(model):
+#     return ['loss', 'uni3d_loss', 'pc_image_acc', 'pc_text_acc']
+
+# def create_uni3d(args):  
+#     # create transformer blocks for point cloud via timm
+#     point_transformer = timm.create_model(args.pc_model, checkpoint_path=args.pretrained_pc, drop_path_rate=args.drop_path_rate)
+
+#     # create whole point cloud encoder
+#     point_encoder = PointcloudEncoder(point_transformer, args)
+
+#     # uni3d model
+#     model = Uni3D(point_encoder=point_encoder,)
+#     return model
+

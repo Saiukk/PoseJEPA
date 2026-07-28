@@ -1,3 +1,16 @@
-_target_: src.models.encoder3d.Uni3D
+_target_: models.encoder3d.Uni3D.Uni3DEncoder
 
 # Define other variables..
+
+ckpt_path: weights/model.pt
+pc_model: eva02_base_patch14_448
+
+trans_dim: 768
+group_size: 32
+num_group: 512
+pc_encoder_dim: 512
+patch_dropout: 0.0
+freeze: True
+
+## DO NOT TOUCH
+embed_dim: 1024   # Never used but must be defined to avoid error

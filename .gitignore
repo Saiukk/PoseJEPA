@@ -16,3 +16,9 @@ tensorboard/
 
 # Temporary files
 prova.py
+
+# Python cache files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
