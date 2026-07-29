@@ -73,5 +73,5 @@ class DINOv2(BaseEncoder2D):
             device = next(self.model.parameters()).device
             dummy_input = torch.zeros(3, 224, 224, device=device)  
             features = self.extractFeatures(dummy_input)
-            self._output_dim = features.shape[-1]
+            self._output_dim = features.shape
         return self._output_dim
