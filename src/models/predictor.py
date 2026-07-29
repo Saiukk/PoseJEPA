@@ -1,9 +1,10 @@
 import torch
 import torch.nn as nn
+import logging
 
 
 class TransformerPosePredictor(nn.Module):
-    """Predictor that takes as input a 3D context and a pose, and predicts a sequence of 2D tokens."""
+    """Predictor that takes as input a 3D context, a pose and a mask, and predicts a sequence of 2D tokens."""
 
     def __init__(
         self,
@@ -60,8 +61,10 @@ class TransformerPosePredictor(nn.Module):
 
         self._init_weights()
 
+        logging.info(f"TransformerPosePredictor initialized ")
+
     def _init_weights(self):
-        nn.init.normal_(self.mask_token, std=0.02)
+        nn.init.normal_(self.void_token, std=0.02)
         nn.init.normal_(self.pos_embed_2d, std=0.02)
 
 
@@ -88,7 +91,7 @@ class TransformerPosePredictor(nn.Module):
         # Concatenation
         transformer_input = torch.cat([pose_token, context_tokens, target_tokens], dim=1)
         out_sequence = self.transformer(transformer_input)
-        
+
         # only the predicted
         predicted_2d_tokens = out_sequence[:, -self.target_seq_len:, :]
         return self.output_proj(predicted_2d_tokens)

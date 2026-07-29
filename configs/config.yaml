@@ -1,9 +1,12 @@
 defaults:
   - encoder2d: dinov2
   - encoder3d: uni3d
-  #- Predictor: predictor
+  - Predictor: predictor
   - _self_
 
 hydra:
   run:
     dir: /experiments/riccardop02/outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}
+
+gso:
+  root: /data/riccardop02/datasets/gso

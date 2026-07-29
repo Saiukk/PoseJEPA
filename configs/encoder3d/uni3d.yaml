@@ -5,10 +5,10 @@ _target_: models.encoder3d.Uni3D.Uni3DEncoder
 ckpt_path: weights/model.pt
 pc_model: eva02_base_patch14_448
 
-trans_dim: 768
-group_size: 32
-num_group: 512
-pc_encoder_dim: 512
+trans_dim: 768 # hidden dimension of the transformer, where everything is projected
+group_size: 32  # number of points in each group (KNN)
+num_group: 512  # number of groups (N)
+pc_encoder_dim: 512  # dimension of the point cloud encoder
 patch_dropout: 0.0
 freeze: True
 
