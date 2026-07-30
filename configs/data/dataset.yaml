@@ -1,4 +1,8 @@
 _target_: data.dataset.GSOMegaposeDataset
-shard_source: /path/to/shards/*.tar      # local path /../*.tar or if remote URL, use https://host/shards/{00000..99000}.tar
-padding_ratio: 0.2
-shardshuffle: false
+shard_source: https://www.paris.inria.fr/archive_ylabbeprojectsdata/megapose/webdatasets/gso_1M/00000005.tar     # local path /../*.tar or if remote URL, use https://host/shards/{00000..99000}.tar
+crop_ratio: 1.2
+shardshuffle: False
+out_size: 224
+mean: [0.485, 0.456, 0.406]
+std: [0.229, 0.224, 0.225]
+

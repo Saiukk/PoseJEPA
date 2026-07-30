@@ -37,32 +37,30 @@ class DINOv2(BaseEncoder2D):
         self._output_dim = None   # For the predictor
 
     @torch.no_grad()
-    def extractFeatures(self, x) -> torch.Tensor:
+    def extractFeatures(self, pixel_values: torch.Tensor) -> torch.Tensor:
         '''
         Methods to return the features computed by DINOv2
         '''
-        device = next(self.model.parameters()).device
-        inputs = self.processor(images=x, return_tensors="pt").to(device)
-        hs = self.model(**inputs, output_hidden_states=True).hidden_states
+        hs = self.model(pixel_values=pixel_values, output_hidden_states=True).hidden_states
 
         parts = []
         for L in self.layers:
-            h = hs[L][0]
+            h = hs[L]                          # (B, 1+N, D)
             if self.token == "cls":
-                v = h[0]
+                v = h[:, 0]                    # (B, D)
                 if self.normalize:
                     v = F.normalize(v, dim=-1)
             elif self.token == "PatchToken":
-                v = h[1:]
+                v = h[:, 1:]                   # (B, N, D)
                 if self.normalize:
                     v = F.normalize(v, dim=-1)
             elif self.token == "ptc":
-                v = h[1:].flatten()
+                v = h[:, 1:].flatten(1)        # (B, N*D)
                 if self.normalize:
                     v = F.normalize(v, dim=-1)
             parts.append(v)
 
-        return torch.cat(parts, dim=-1) if parts[0].dim() == 1 else torch.cat(parts, dim=0)
+        return torch.cat(parts, dim=-1)
 
     @property
     def output_dim(self) -> int:
@@ -71,7 +69,7 @@ class DINOv2(BaseEncoder2D):
         '''
         if self._output_dim is None:
             device = next(self.model.parameters()).device
-            dummy_input = torch.zeros(3, 224, 224, device=device)  
+            dummy_input = torch.zeros(1, 3, 224, 224, device=device)
             features = self.extractFeatures(dummy_input)
-            self._output_dim = features.shape
+            self._output_dim = features.shape[1:]
         return self._output_dim

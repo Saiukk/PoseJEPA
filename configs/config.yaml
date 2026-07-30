@@ -2,6 +2,7 @@ defaults:
   - encoder2d: dinov2
   - encoder3d: uni3d
   - Predictor: predictor
+  - data: dataset
   - _self_
 
 hydra:
@@ -10,3 +11,7 @@ hydra:
 
 gso:
   root: /data/riccardop02/datasets/gso
+
+loader:
+  batch_size: 1
+  num_workers: 0
