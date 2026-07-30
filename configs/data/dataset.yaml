@@ -1,0 +1,4 @@
+_target_: data.dataset.GSOMegaposeDataset
+shard_source: /path/to/shards/*.tar      # local path /../*.tar or if remote URL, use https://host/shards/{00000..99000}.tar
+padding_ratio: 0.2
+shardshuffle: false

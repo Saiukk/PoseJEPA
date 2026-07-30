@@ -11,7 +11,7 @@ print(f"download of {NAME} ...")
 snapshot_download(
     repo_id=f"bop-benchmark/{NAME}",
     repo_type="dataset",
-    local_dir=f"/Experiments/riccardop02/datasets/{NAME}",
+    local_dir=f"/data/riccardop02/datasets/{NAME}",
     
     allow_patterns=[
             # "*base.zip", 
