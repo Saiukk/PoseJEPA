@@ -7,6 +7,7 @@ import json
 import io
 import glob
 import logging
+import random
 from braceexpand import braceexpand
 from scipy.spatial.transform import Rotation as R
 
@@ -59,7 +60,10 @@ class GSOMegaposeDataset(IterableDataset):
         patch_size: int = 14,
         mean: tuple = (0.485, 0.456, 0.406),
         std: tuple = (0.229, 0.224, 0.225),
-        cache_context: bool = True
+        cache_context: bool = True,
+        val_shards: int = 0,
+        split: str = "train",
+        split_seed: int = 42,
     ):
         super().__init__()
         self.shard_source = shard_source
@@ -76,14 +80,49 @@ class GSOMegaposeDataset(IterableDataset):
         self.grid = out_size // patch_size
         self.num_tokens = self.grid * self.grid
 
-        self.shard_paths = self._resolve_shards(shard_source)
-        if len(self.shard_paths) == 0:
+        if split not in ("train", "val"):
+            raise ValueError(f"split should be 'train' or 'val', received: {split}")
+        self.split = split
+        self.val_shards = val_shards
+
+        all_shards = self._resolve_shards(shard_source)
+        if len(all_shards) == 0:
+            raise ValueError(f"No shard found for shard_source={shard_source}")
+
+        self.shard_paths = self._split_shards(all_shards, val_shards, split, split_seed)
+        if split == "train" and len(self.shard_paths) == 0:
             raise ValueError(f"No shard found for shard_source={shard_source}")
 
         logging.info(
-            f"[GSOMegaposeDataset] {len(self.shard_paths)} founded, type: "
-            f"({'remote' if self._is_remote(shard_source) else 'local'})"
+            f"[GSOMegaposeDataset:{split}] {len(self.shard_paths)}/{len(all_shards)} shards, "
+            f"type: ({'remote' if self._is_remote(shard_source) else 'local'})"
         )
+
+    @staticmethod
+    def _split_shards(all_shards, val_shards: float, split: str, seed: int):
+
+        if val_shards == 0:
+            return list(all_shards) if split == "train" else []
+
+        if not 0 < val_shards < 1:
+            raise ValueError(
+                f"val_shards should be a fraction in (0, 1), received: {val_shards}"
+            )
+
+        n_total = len(all_shards)
+        n_val = max(1, round(n_total * val_shards))
+        if n_val >= n_total:
+            raise ValueError(
+                f"val_shards={val_shards} resulting in {n_val}/{n_total} shard: "
+                f" No for train split"
+            )
+
+        shuffled = list(all_shards)
+        random.Random(seed).shuffle(shuffled)
+
+        val_set = sorted(shuffled[:n_val])
+        train_set = sorted(shuffled[n_val:])
+        return val_set if split == "val" else train_set
 
     @staticmethod
     def _is_remote(source: str) -> bool:

@@ -3,6 +3,7 @@ defaults:
   - encoder3d: uni3d
   - Predictor: predictor
   - data: dataset
+  - train: train
   - _self_
 
 hydra:
@@ -11,7 +12,3 @@ hydra:
 
 gso:
   root: /data/riccardop02/datasets/gso
-
-loader:
-  batch_size: 1
-  num_workers: 0

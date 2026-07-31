@@ -25,3 +25,4 @@ __pycache__/
 
 # Not finish yet
 checkdata.ipynb
+train.py

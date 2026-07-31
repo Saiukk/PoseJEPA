@@ -1,0 +1,14 @@
+loader:
+  batch_size: 32
+  num_workers: 1
+
+trainer:
+  lr: 3e-4
+  weight_decay: 0.05
+  epochs: 100
+  log_every: 20
+  ckpt_every: 5
+  resume: null
+
+
+trainable_components: [encoder3d, predictor]
