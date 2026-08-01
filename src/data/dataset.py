@@ -38,7 +38,7 @@ def compute_context(model_name, dataset_source, cache_context):
         context_path = f"{dataset_source}/{model_name}/embedding.npy"
         try:
             context3d = np.load(context_path)
-            logging.info(f"Loaded cached context for {model_name} from {context_path}")
+            #logging.info(f"Loaded cached context for {model_name} from {context_path}")
         except FileNotFoundError:
             logging.warning(f"Cached context for {model_name} not found at {context_path}.")
 

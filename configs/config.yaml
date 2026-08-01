@@ -4,6 +4,7 @@ defaults:
   - Predictor: predictor
   - data: dataset
   - train: train
+  - wandb: wandb
   - _self_
 
 hydra:

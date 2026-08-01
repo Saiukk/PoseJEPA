@@ -1,4 +1,4 @@
-_target_: models.predictor.TransformerPosePredictor
+_target_: src.models.predictor.TransformerPosePredictor
 
 # OTHER HYPERPARAMETERS
 

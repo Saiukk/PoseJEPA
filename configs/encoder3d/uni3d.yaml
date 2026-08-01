@@ -1,4 +1,4 @@
-_target_: models.encoder3d.Uni3D.Uni3DEncoder
+_target_: src.models.encoder3d.Uni3D.Uni3DEncoder
 
 # Define other variables..
 

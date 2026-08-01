@@ -11,4 +11,4 @@ trainer:
   resume: null
 
 
-trainable_components: [encoder3d, predictor]
+trainable_components: [predictor]
