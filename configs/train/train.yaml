@@ -1,14 +1,21 @@
 loader:
-  batch_size: 32
-  num_workers: 1
+  batch_size: 64            #32
+  num_workers: 4
 
 trainer:
   lr: 3e-4
   weight_decay: 0.05
-  epochs: 100
+  epochs: 50
+  steps_per_epoch: 100      # 2000
+  val_steps: 100
+  warmup_frac: 0.03
+  min_lr_ratio: 0.01
   log_every: 20
   ckpt_every: 5
-  resume: null
+  val_every: 1
+  early_stop_patience: 8
+  early_stop_min_delta: 0.0
+  resume: null    # PATH TO CHECHPOINT 
 
 
 trainable_components: [predictor]

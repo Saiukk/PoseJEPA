@@ -30,6 +30,7 @@ def _inv_rigid(T):
 def compute_context(model_name, dataset_source, cache_context):
     """
     Compute the 3D context for a given model name.
+    Ritorna None se l'embedding non c'e' -> l'oggetto viene skippato.
     """
 
     model_name = model_name.replace("gso_", "") 
@@ -41,6 +42,7 @@ def compute_context(model_name, dataset_source, cache_context):
             #logging.info(f"Loaded cached context for {model_name} from {context_path}")
         except FileNotFoundError:
             logging.warning(f"Cached context for {model_name} not found at {context_path}.")
+            return None  
 
             
     # Compute !TODO
@@ -64,6 +66,8 @@ class GSOMegaposeDataset(IterableDataset):
         val_shards: int = 0,
         split: str = "train",
         split_seed: int = 42,
+        shuffle_buffer: int = 2000,
+        visible_frac: float = 0.3,
     ):
         super().__init__()
         self.shard_source = shard_source
@@ -75,6 +79,8 @@ class GSOMegaposeDataset(IterableDataset):
         self.std = tuple(float(v) for v in std)
         self.cache_context = cache_context
         self.dataset_source = dataset_source
+        self.shuffle_buffer = shuffle_buffer
+        self.visible_frac = visible_frac
         if out_size % patch_size != 0:
             raise ValueError(f"out_size ({out_size}) patch size ({patch_size})")
         self.grid = out_size // patch_size
@@ -163,6 +169,10 @@ class GSOMegaposeDataset(IterableDataset):
             K = np.array(cam["K"], dtype=np.float32)
 
             for obj in object_datas:
+                # Object too occluded, skip it
+                if self.visible_frac > float(obj["visib_fract"]):
+                    continue
+                
                 mask_bool = (seg_np == obj["unique_id"])
                 if not mask_bool.any():
                     continue
@@ -207,8 +217,16 @@ class GSOMegaposeDataset(IterableDataset):
                 }
 
     def __iter__(self):
-        pipeline = (
-            wds.WebDataset(self.shard_paths, shardshuffle=self.shardshuffle)
-            .compose(self._expand_objects)
-        )
+        is_train = self.split == "train"
+
+        pipeline = wds.WebDataset(
+            self.shard_paths,
+            shardshuffle=self.shardshuffle if is_train else False,
+            resampled=is_train,
+        ).compose(self._expand_objects)
+
+        # Suffle the object obtained by expand objects.
+        if is_train and self.shuffle_buffer:
+            pipeline = pipeline.shuffle(self.shuffle_buffer)
+
         return iter(pipeline)

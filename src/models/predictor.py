@@ -52,7 +52,12 @@ class TransformerPosePredictor(nn.Module):
             batch_first=True,
             norm_first=True,
         )
-        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=depth)
+       
+        self.transformer = nn.TransformerEncoder(
+            encoder_layer,
+            num_layers=depth,
+            norm=nn.LayerNorm(embed_dim),
+        )
 
         # Output projection to the desired output dimension (not used if output_dim == embed_dim)
         self.output_proj = (
@@ -66,6 +71,18 @@ class TransformerPosePredictor(nn.Module):
     def _init_weights(self):
         nn.init.normal_(self.void_token, std=0.02)
         nn.init.normal_(self.pos_embed_2d, std=0.02)
+
+        # Initialize weights of Transformer  (https://github.com/facebookresearch/dino/blob/main/vision_transformer.py)
+        def _init_module(m):
+            if isinstance(m, nn.Linear):
+                nn.init.trunc_normal_(m.weight, std=0.02)
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
+            elif isinstance(m, nn.LayerNorm):
+                nn.init.ones_(m.weight)
+                nn.init.zeros_(m.bias)
+
+        self.apply(_init_module)
 
 
     def forward(
