@@ -6,7 +6,7 @@ trainer:
   lr: 3e-4
   weight_decay: 0.05
   epochs: 50
-  steps_per_epoch: 100      # 2000
+  steps_per_epoch: 1200
   val_steps: 100
   warmup_frac: 0.03
   min_lr_ratio: 0.01
