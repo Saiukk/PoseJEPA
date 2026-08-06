@@ -222,7 +222,7 @@ class GSOMegaposeDataset(IterableDataset):
         pipeline = wds.WebDataset(
             self.shard_paths,
             shardshuffle=self.shardshuffle if is_train else False,
-            resampled=is_train,
+            #resampled=is_train,
         ).compose(self._expand_objects)
 
         # Suffle the object obtained by expand objects.

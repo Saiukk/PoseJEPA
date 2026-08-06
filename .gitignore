@@ -23,5 +23,8 @@ __pycache__/
 *.pyo
 *.pyd
 
-# Not finish yet
+# Not finish yet or not shared
 checkdata.ipynb
+tar_creation.py
+tar_validation.py
+tar_validation_SM.py
