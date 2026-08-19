@@ -36,9 +36,12 @@ def compute_context(model_name, dataset_source, cache_context):
     model_name = model_name.replace("gso_", "") 
     if cache_context:
         # Load the 3D context from a precomputed cache
-        context_path = f"{dataset_source}/{model_name}/embedding.npy"
+        context_path = f"{dataset_source}/{model_name}/embedding.npz"
         try:
-            context3d = np.load(context_path)
+            context_data = np.load(context_path)
+
+            context_3d = context_data["features"]
+            center_3d = context_data["centers"]
             #logging.info(f"Loaded cached context for {model_name} from {context_path}")
         except FileNotFoundError:
             logging.warning(f"Cached context for {model_name} not found at {context_path}.")
@@ -49,7 +52,7 @@ def compute_context(model_name, dataset_source, cache_context):
     else:
         raise NotImplementedError("3D context computation is not implemented yet.")
 
-    return context3d
+    return context_3d, center_3d
 
 class GSOMegaposeDataset(IterableDataset):
     def __init__(
@@ -166,7 +169,7 @@ class GSOMegaposeDataset(IterableDataset):
 
             # camera->world inversa, poi camera->oggetto per ciascun oggetto
             TCW = _inv_rigid(_pose_to_mat(cam["TWC"]))
-            K = np.array(cam["K"], dtype=np.float32)
+            K_orig = np.array(cam["K"], dtype=np.float32)
 
             for obj in object_datas:
                 # Object too occluded, skip it
@@ -198,9 +201,25 @@ class GSOMegaposeDataset(IterableDataset):
                 trans = TCO[:3, 3].astype(np.float32)          
                 quat = R.from_matrix(rot_matrix).as_quat().astype(np.float32)  
 
+                # Comoput the right K intrinci (after cropping)
+                xmin, ymin, xmax, ymax = box
+                crop_w, crop_h = xmax - xmin, ymax - ymin
+
+                # NOTE: I compute the scale after the cropping so is not H'/H but H'/crop_h, same for W
+                scale_x = self.out_size / float(crop_w)
+                scale_y = self.out_size / float(crop_h)
+
+                K_crop = K_orig.copy()
+
+                # update focal and the center
+                K_crop[0, 0] = K_orig[0, 0] * scale_x  
+                K_crop[1, 1] = K_orig[1, 1] * scale_y  
+                K_crop[0, 2] = (K_orig[0, 2] - xmin) * scale_x 
+                K_crop[1, 2] = (K_orig[1, 2] - ymin) * scale_y 
+
 
                 # Passing the 3d context to the predictor
-                context_3d = compute_context(obj["label"], self.dataset_source, self.cache_context)  
+                context_3d, center_3d = compute_context(obj["label"], self.dataset_source, self.cache_context)  
 
                 yield {
                     "image": img_t,
@@ -209,9 +228,10 @@ class GSOMegaposeDataset(IterableDataset):
                     "quat": quat,
                     "rot_matrix": rot_matrix,
                     "trans": trans,
-                    "K": K,
+                    "K": K_crop,
                     "model_name": obj["label"],
                     "context_3d": context_3d,
+                    "center_3d": center_3d,
                     "visib_fract": float(obj["visib_fract"]),
                     "scene_key": scene_key,
                 }

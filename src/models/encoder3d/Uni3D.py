@@ -71,7 +71,7 @@ class Uni3DEncoder(BaseEncoder3D):
         for blk in pe.visual.blocks:
             x = blk(x)
         x = pe.visual.norm(x)          
-        return x[:, 1:, :]             # Do not return the cls token, only the patch tokens (B, num_group, C)
+        return x[:, 1:, :], center      # Do not return the cls token, only the patch tokens (B, num_group, C)
 
     
     def _infer_output_shape(self):
@@ -79,13 +79,12 @@ class Uni3DEncoder(BaseEncoder3D):
         was_training = self.point_encoder.training
         self.point_encoder.eval()
         with torch.no_grad():
-            # num_group punti bastano: FPS campiona num_group da num_group (identità),
-            # kNN con group_size <= num_group è sempre soddisfatto
+            
             dummy = torch.zeros(1, self.num_group, 6, device=device)
-            out = self._forward_dense(dummy[:, :, :3].contiguous(),
+            out, center = self._forward_dense(dummy[:, :, :3].contiguous(),
                                        dummy[:, :, 3:].contiguous())
         self.point_encoder.train(was_training)
-        return tuple(out.shape)   # (1, num_group, C)
+        return tuple(out.shape), tuple(center.shape)   # (1, num_group, C) (B, num_group, 3)
 
     @property
     def output_dim(self) -> tuple:

@@ -8,6 +8,7 @@ import time
 import hydra
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import wandb
 from hydra.core.hydra_config import HydraConfig
 from omegaconf import DictConfig, OmegaConf
@@ -32,7 +33,7 @@ def _output_dir() -> str:
 
 
 class Engine:
-    """ The brain  """
+    """ The brain """
 
     def __init__(self, cfg: DictConfig, is_train: bool):
         self.cfg = cfg
@@ -85,7 +86,7 @@ class Engine:
         encoder3d = hydra.utils.instantiate(self.cfg.encoder3d).to(self.device)
         predictor = hydra.utils.instantiate(
             self.cfg.Predictor,
-            context_dim=encoder3d.output_dim[-1],
+            context_dim=encoder3d.output_dim[0][-1],
             output_dim=encoder2d.output_dim[-1],
         ).to(self.device)
         models = {"encoder2d": encoder2d, "encoder3d": encoder3d, "predictor": predictor}
@@ -221,8 +222,7 @@ class Engine:
         )
         log.info("wandb initialized: dir=%s run_id=%s", _output_dir(), self.wandb_run.id)
 
-    ## PUBLIC ENTRTY POINTS
-
+    ## PUBLIC ENTRY POINTS
 
     def run(self):
         if self.is_train:
@@ -276,9 +276,15 @@ class Engine:
         )
         return True
 
+    @staticmethod
+    def _baseline_l1(target: torch.Tensor) -> float:
+        """L1 of the best constant predictor"""
+        median = target.median(dim=0, keepdim=True).values
+        return F.l1_loss(median.expand_as(target), target).item()
+
     def train_epoch(self, epoch: int) -> dict:
         self._set_train_mode()
-        running_loss, n_batches = 0.0, 0
+        running_loss, running_cos, n_batches = 0.0, 0.0, 0
         start_time = time.time()
         total_steps = self.steps_per_epoch
 
@@ -293,25 +299,36 @@ class Engine:
             self.optimizer.zero_grad(set_to_none=True)
             pred, target = self._forward(batch)
             loss = self.criterion(pred, target)
+
+            # metrica interpretabile: 0 = predizione ortogonale al target, 1 = perfetta.
+            # solo logging, non entra nel backward.
+            with torch.no_grad():
+                cos = F.cosine_similarity(pred, target, dim=-1).mean().item()
+
             loss.backward()
             self.optimizer.step()
             self.scheduler.step()
             self.global_step += 1
 
             running_loss += loss.item()
+            running_cos += cos
             n_batches += 1
             if step % self.log_every == 0:
                 lr = self.optimizer.param_groups[0]["lr"]
-                log.info("epoch %d step %d/%d loss=%.4f lr=%.2e",
-                         epoch, step, total_steps, loss.item(), lr)
+                log.info("epoch %d step %d/%d loss=%.4f cos=%.4f lr=%.2e",
+                         epoch, step, total_steps, loss.item(), cos, lr)
                 if self.wandb_run is not None:
-                    wandb.log({"train/loss_step": loss.item(), "train/lr": lr},
+                    wandb.log({"train/loss_step": loss.item(),
+                               "train/cos_step": cos,
+                               "train/lr": lr},
                               step=self.global_step)
 
         elapsed = time.time() - start_time
         seen = n_batches * self.cfg.train.loader.batch_size
+        n = max(n_batches, 1)
         return {
-            "loss": running_loss / max(n_batches, 1),
+            "loss": running_loss / n,
+            "cos": running_cos / n,
             "time_s": round(elapsed, 1),
             "samples_per_s": round(seen / max(elapsed, 1e-6), 1),   # per tarare steps_per_epoch
         }
@@ -325,7 +342,8 @@ class Engine:
         for m in self.models.values():
             m.eval()
 
-        running_loss, n_batches = 0.0, 0
+        running_loss, running_loss_perm, n_batches = 0.0, 0.0, 0
+        running_cos, running_cos_perm, running_baseline = 0.0, 0.0, 0.0
         start_time = time.time()
 
         for batch in self.val_loader:
@@ -337,11 +355,50 @@ class Engine:
             pred, target = self._forward(batch)
             loss = self.criterion(pred, target)
             running_loss += loss.item()
+            running_cos += F.cosine_similarity(pred, target, dim=-1).mean().item()
+
+            # loss del miglior predittore costante: la soglia da battere
+            running_baseline += self._baseline_l1(target)
+
+            # --- controllo: rotazione permutata nel batch ---
+            B = target.shape[0]
+            perm = torch.randperm(B, device=target.device)
+            if B > 1 and (perm == torch.arange(B, device=target.device)).all():
+                perm = perm.roll(1)
+
+            # Calcola la predizione usando la matrice R di altri oggetti (permutata)
+            R_mat = batch["rot_matrix"]
+            pred_perm, _ = self._forward(batch, override_R=R_mat[perm])
+            
+            running_loss_perm += self.criterion(pred_perm, target).item()
+            running_cos_perm += F.cosine_similarity(pred_perm, target, dim=-1).mean().item()
+
             n_batches += 1
 
         elapsed = time.time() - start_time
-        self._set_train_mode()  # restore train mode for trainable modules
-        return {"loss": running_loss / max(n_batches, 1), "time_s": round(elapsed, 1)}
+        self._set_train_mode()
+
+        n = max(n_batches, 1)
+        loss_true = running_loss / n
+        loss_perm = running_loss_perm / n
+        cos_true = running_cos / n
+        cos_perm = running_cos_perm / n
+        baseline = running_baseline / n
+
+        return {
+            "loss": loss_true,
+            "loss_perm": loss_perm,
+            "gap_R": (loss_perm - loss_true) / max(loss_perm, 1e-8),
+            "cos": cos_true,
+            "cos_perm": cos_perm,
+            # differenza assoluta di coseni: non viene schiacciata dalla componente
+            # banale della loss, a differenza di gap_R
+            "gap_cos": cos_true - cos_perm,
+            "baseline_l1": baseline,
+            # < 1 -> il modello batte il predittore costante. >= 1 -> non serve a niente.
+            "loss_ratio": loss_true / max(baseline, 1e-8),
+            "time_s": round(elapsed, 1),
+        }
 
     def _to_device(self, batch: dict) -> dict:
         """Move every tensor in the batch to self.device; leave non-tensor fields (strings) as-is."""
@@ -350,17 +407,53 @@ class Engine:
             for k, v in batch.items()
         }
 
-    def _forward(self, batch: dict):
+    @staticmethod
+    def _generate_rays(K: torch.Tensor, R: torch.Tensor, grid_size: int = 16, patch_size: int = 14) -> torch.Tensor:
+        
+        B = K.shape[0]
+        device = K.device
+
+        y = torch.arange(grid_size, device=device, dtype=torch.float32)
+        x = torch.arange(grid_size, device=device, dtype=torch.float32)
+        grid_y, grid_x = torch.meshgrid(y, x, indexing='ij')
+        
+        u = grid_x * patch_size + (patch_size / 2.0)
+        v = grid_y * patch_size + (patch_size / 2.0)
+        
+        uv1 = torch.stack([u, v, torch.ones_like(u)], dim=-1).reshape(-1, 3)
+        uv1 = uv1.unsqueeze(0).expand(B, -1, -1)  # (B, 256, 3)
+
+        K_inv = torch.linalg.inv(K)
+        d_c = torch.bmm(uv1, K_inv.transpose(1, 2))  
+
+        R_inv = R.transpose(1, 2)
+        d_o = torch.bmm(d_c, R_inv.transpose(1, 2))  # Object space rays
+
+        return F.normalize(d_o, p=2, dim=-1)
+
+    def _forward(self, batch: dict, override_R: torch.Tensor = None):
         """Run encoder2d (frozen, target) and predictor (trainable, prediction)."""
         img = batch["image"]
-        pose = batch["rot_matrix"].flatten(1)   # (B, 3, 3) -> (B, 9)
-        m = batch["mask_tokens"]                # (B, 256)
-        context = batch["context_3d"]           # (B, N, context_dim)
+        K = batch["K"]
+        m = batch["mask_tokens"]
+        context_features = batch["context_3d"]
+        context_centers = batch["center_3d"]
+        
+        # Se non passiamo una R forzata (permutata), usiamo quella Ground Truth
+        R_mat = override_R if override_R is not None else batch["rot_matrix"]
+
+        # Generiamo i raggi differenziabili
+        ray_dirs = self._generate_rays(K, R_mat, grid_size=16, patch_size=14)
 
         with torch.no_grad():
             target = self.models["encoder2d"](img)   # frozen, no grad needed
 
-        pred = self.models["predictor"](context, pose, m)   # trainable, must track grad
+        pred = self.models["predictor"](
+            ray_queries=ray_dirs, 
+            context_features=context_features, 
+            context_centers=context_centers, 
+            mask=m
+        )
 
         return pred, target
 
@@ -383,14 +476,15 @@ class Engine:
             "wandb_run_id": self.wandb_run.id if self.wandb_run is not None else None,
         }
 
-        path = os.path.join(ckpt_dir, f"epoch_{epoch:04d}.pt")
-        torch.save(payload, path)
-        log.info("Checkpoint saved: %s", path)
-
         if is_best:
             best_path = os.path.join(ckpt_dir, "best.pt")
             torch.save(payload, best_path)
             log.info("New best checkpoint (val_loss=%.4f): %s", val_loss, best_path)
+
+        else:
+            path = os.path.join(ckpt_dir, f"epoch_{epoch:04d}.pt")
+            torch.save(payload, path)
+            log.info("Checkpoint saved: %s", path)
 
     def load_checkpoint(self, path: str, strict: bool = False) -> dict:
         ckpt = torch.load(path, map_location=self.device)

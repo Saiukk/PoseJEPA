@@ -6,6 +6,8 @@ import trimesh
 from PIL import Image
 import hydra
 from omegaconf import DictConfig
+import sys
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # Add the parent directory to sys.path
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger(__name__)
@@ -106,9 +108,9 @@ def process_model(model_dir: str, encoder3d, n_points: int, device: torch.device
     pc_tensor = torch.from_numpy(pc).unsqueeze(0).to(device)  # (1, N, 6)
 
     with torch.no_grad():
-        feats = encoder3d.extractFeatures(pc_tensor)  # (1, num_group, trans_dim)
+        feats, centers = encoder3d.extractFeatures(pc_tensor)  # (1, num_group, trans_dim)
 
-    return feats.squeeze(0).cpu().numpy()  # (num_group, trans_dim)
+    return feats.squeeze(0).cpu().numpy(), centers.squeeze(0).cpu().numpy()  # (num_group, trans_dim), (num_group, 3)
 
 
 
@@ -125,8 +127,8 @@ def main(cfg: DictConfig):
     # Setting parameters from config
     root = cfg.gso.root
     n_points = cfg.gso.get("n_points", 8192)
-    output_name = cfg.gso.get("output_name", "embedding.npy")
-    overwrite = cfg.gso.get("overwrite", False)
+    output_name = cfg.gso.get("output_name", "embedding.npz")
+    overwrite = cfg.gso.get("overwrite", True)
 
     model_dirs = sorted(
         d for d in os.listdir(root)
@@ -147,9 +149,9 @@ def main(cfg: DictConfig):
             continue
 
         try:
-            emb = process_model(model_dir, encoder3d, n_points, device)
-            np.save(out_path, emb)
-            log.info(f"[OK]   {name}: shape={emb.shape} -> {out_path}")
+            feats, centers = process_model(model_dir, encoder3d, n_points, device)
+            np.savez(out_path, features=feats, centers=centers)
+            log.info(f"[OK]   {name}: feats={feats.shape}, centers={centers.shape} -> {out_path}")
             n_ok += 1
         except Exception as e:
             log.error(f"[FAIL] {name}: {e}")
