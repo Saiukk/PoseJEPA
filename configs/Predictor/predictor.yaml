@@ -1,4 +1,4 @@
-_target_: src.models.predictor.TransformerPosePredictor
+_target_: src.models.crosspredictor.AdaLNPosePredictor #src.models.predictor.TransformerPosePredictor
 
 # OTHER HYPERPARAMETERS
 

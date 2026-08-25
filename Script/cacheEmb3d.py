@@ -6,6 +6,8 @@ import trimesh
 from PIL import Image
 import hydra
 from omegaconf import DictConfig
+import sys
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # Add the parent directory to sys.path
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger(__name__)
@@ -126,7 +128,7 @@ def main(cfg: DictConfig):
     root = cfg.gso.root
     n_points = cfg.gso.get("n_points", 8192)
     output_name = cfg.gso.get("output_name", "embedding.npy")
-    overwrite = cfg.gso.get("overwrite", False)
+    overwrite = cfg.gso.get("overwrite", True)
 
     model_dirs = sorted(
         d for d in os.listdir(root)

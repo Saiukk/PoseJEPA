@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import logging
+import torch.nn.functional as F
 
 
 class TransformerPosePredictor(nn.Module):
@@ -60,9 +61,7 @@ class TransformerPosePredictor(nn.Module):
         )
 
         # Output projection to the desired output dimension (not used if output_dim == embed_dim)
-        self.output_proj = (
-            nn.Linear(embed_dim, output_dim) if output_dim != embed_dim else nn.Identity()
-        )
+        self.output_proj = nn.Linear(embed_dim, output_dim)
 
         self._init_weights()
 
@@ -111,4 +110,4 @@ class TransformerPosePredictor(nn.Module):
 
         # only the predicted
         predicted_2d_tokens = out_sequence[:, -self.target_seq_len:, :]
-        return self.output_proj(predicted_2d_tokens)
+        return F.normalize(self.output_proj(predicted_2d_tokens), dim=-1)
