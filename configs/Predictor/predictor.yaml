@@ -1,4 +1,4 @@
-_target_: src.models.crosspredictor.AdaLNPosePredictor #src.models.predictor.TransformerPosePredictor
+_target_: src.models.crosspredictor.RayCrossAttnPredictor2 #src.models.predictor.TransformerPosePredictor
 
 # OTHER HYPERPARAMETERS
 
@@ -6,6 +6,7 @@ embed_dim: 768          # dim interna del transformer, dove tutto viene proietta
 num_heads: 12
 depth: 6
 mlp_dim: null           # null -> embed_dim * 4
-target_seq_len: 256     # target to predict, 256 = 16x16
-pose_dim: 9             # rotation matrix dimension
-dropout: 0.0
+# target_seq_len: 256     # target to predict, 256 = 16x16
+# pose_dim: 9             # rotation matrix dimension
+dropout: 0.2
+fourier_bands: 6

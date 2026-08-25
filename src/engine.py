@@ -46,6 +46,12 @@ class Engine:
 
         self.models = self._build_models()
         self.criterion = nn.L1Loss()
+
+        # Soglia su mask_tokens: sotto questa frazione di copertura oggetto,
+        # il token viene escluso dalla loss (sfondo/occlusione -> non apprendibile
+        # dal predictor, che non riceve mai i pixel reali come input).
+        self.mask_threshold = float(cfg.train.get("mask_threshold", 0.5))
+
         self.loader = self._build_dataloader(split="train")
 
         # only set if is_train=True, otherwise stay None
@@ -276,11 +282,40 @@ class Engine:
         )
         return True
 
+    # --- helper per la loss/cos filtrate sui soli token "on-object" ---
+    #
+    # Il predictor non riceve mai i pixel reali come input (solo raggio, mask,
+    # contesto 3D) quindi non ha modo di indovinare cosa DINOv2 vede nei token
+    # di sfondo/occlusione. Includerli nella loss diluisce il gradiente utile
+    # con un segnale strutturalmente non apprendibile. mask_tokens (frazione
+    # di copertura oggetto per patch, già presente nel dataset) è usata qui
+    # per escluderli, SENZA cambiare la formula L1 stessa.
+
     @staticmethod
-    def _baseline_l1(target: torch.Tensor) -> float:
-        """L1 of the best constant predictor"""
-        median = target.median(dim=0, keepdim=True).values
-        return F.l1_loss(median.expand_as(target), target).item()
+    def _masked_l1(pred: torch.Tensor, target: torch.Tensor, valid_mask: torch.Tensor) -> torch.Tensor:
+        """L1 pura, mediata solo sui token con valid_mask=True. pred/target: (B, N, D)."""
+        per_token = F.l1_loss(pred, target, reduction="none").mean(dim=-1)  # (B, N)
+        valid = valid_mask.float()
+        denom = valid.sum().clamp(min=1.0)
+        return (per_token * valid).sum() / denom
+
+    @staticmethod
+    def _masked_cos(pred: torch.Tensor, target: torch.Tensor, valid_mask: torch.Tensor) -> torch.Tensor:
+        """Cosine similarity media, solo sui token con valid_mask=True."""
+        per_token = F.cosine_similarity(pred, target, dim=-1)  # (B, N)
+        valid = valid_mask.float()
+        denom = valid.sum().clamp(min=1.0)
+        return (per_token * valid).sum() / denom
+
+    @staticmethod
+    def _baseline_l1(target: torch.Tensor, valid_mask: torch.Tensor) -> float:
+        """L1 del miglior predittore costante, calcolata solo sui token on-object
+        (altrimenti la baseline e la loss del modello non sarebbero confrontabili:
+        loss_ratio andrebbe a confrontare cose diverse)."""
+        valid = valid_mask.bool()
+        target_valid = target[valid] if valid.any() else target.reshape(-1, target.shape[-1])
+        median = target_valid.median(dim=0, keepdim=True).values
+        return F.l1_loss(median.expand_as(target_valid), target_valid).item()
 
     def train_epoch(self, epoch: int) -> dict:
         self._set_train_mode()
@@ -298,12 +333,14 @@ class Engine:
 
             self.optimizer.zero_grad(set_to_none=True)
             pred, target = self._forward(batch)
-            loss = self.criterion(pred, target)
+
+            valid_mask = batch["mask_tokens"] > self.mask_threshold
+            loss = self._masked_l1(pred, target, valid_mask)
 
             # metrica interpretabile: 0 = predizione ortogonale al target, 1 = perfetta.
             # solo logging, non entra nel backward.
             with torch.no_grad():
-                cos = F.cosine_similarity(pred, target, dim=-1).mean().item()
+                cos = self._masked_cos(pred, target, valid_mask).item()
 
             loss.backward()
             self.optimizer.step()
@@ -335,7 +372,6 @@ class Engine:
 
     @torch.no_grad()
     def val_epoch(self, epoch: int) -> dict:
-        """Same L1 loss as training, computed on unseen shards."""
         if self.val_loader is None:
             return {}
 
@@ -352,13 +388,15 @@ class Engine:
                 break
 
             batch = self._to_device(batch)
+            valid_mask = batch["mask_tokens"] > self.mask_threshold
+
             pred, target = self._forward(batch)
-            loss = self.criterion(pred, target)
+            loss = self._masked_l1(pred, target, valid_mask)
             running_loss += loss.item()
-            running_cos += F.cosine_similarity(pred, target, dim=-1).mean().item()
+            running_cos += self._masked_cos(pred, target, valid_mask).item()
 
             # loss del miglior predittore costante: la soglia da battere
-            running_baseline += self._baseline_l1(target)
+            running_baseline += self._baseline_l1(target, valid_mask)
 
             # --- controllo: rotazione permutata nel batch ---
             B = target.shape[0]
@@ -369,9 +407,11 @@ class Engine:
             # Calcola la predizione usando la matrice R di altri oggetti (permutata)
             R_mat = batch["rot_matrix"]
             pred_perm, _ = self._forward(batch, override_R=R_mat[perm])
-            
-            running_loss_perm += self.criterion(pred_perm, target).item()
-            running_cos_perm += F.cosine_similarity(pred_perm, target, dim=-1).mean().item()
+
+            # stessa valid_mask: la maschera dipende dalla segmentazione del
+            # sample, non dalla posa usata per generare i raggi
+            running_loss_perm += self._masked_l1(pred_perm, target, valid_mask).item()
+            running_cos_perm += self._masked_cos(pred_perm, target, valid_mask).item()
 
             n_batches += 1
 

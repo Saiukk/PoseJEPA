@@ -1,10 +1,10 @@
 import hydra
 from omegaconf import DictConfig
 
-from src.engine2 import Engine
+from src.engine import Engine
 import os
 
-os.environ["CUDA_VISIBLE_DEVICES"] = "1"
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 os.environ["HYDRA_FULL_ERROR"] = "1" # Debug
 
 

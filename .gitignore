@@ -28,3 +28,5 @@ checkdata.ipynb
 tar_creation.py
 tar_validation.py
 tar_validation_SM.py
+engine2.py
+computing_symmetry.py
