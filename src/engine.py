@@ -319,6 +319,7 @@ class Engine:
 
     def train_epoch(self, epoch: int) -> dict:
         self._set_train_mode()
+        self.loader.dataset._epoch_counter.value = epoch            # For the workes that has to shuflle the shard with the same seed 
         running_loss, running_cos, n_batches = 0.0, 0.0, 0
         start_time = time.time()
         total_steps = self.steps_per_epoch

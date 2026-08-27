@@ -1,5 +1,6 @@
 import webdataset as wds
 from torch.utils.data import IterableDataset
+import torch.multiprocessing as mp
 import numpy as np
 from PIL import Image
 import torchvision.transforms.functional as TF
@@ -71,6 +72,7 @@ class GSOMegaposeDataset(IterableDataset):
         split_seed: int = 42,
         shuffle_buffer: int = 2000,
         visible_frac: float = 0.3,
+        
     ):
         super().__init__()
         self.shard_source = shard_source
@@ -84,6 +86,7 @@ class GSOMegaposeDataset(IterableDataset):
         self.dataset_source = dataset_source
         self.shuffle_buffer = shuffle_buffer
         self.visible_frac = visible_frac
+        self._epoch_counter = mp.Value("i", 0)
         if out_size % patch_size != 0:
             raise ValueError(f"out_size ({out_size}) patch size ({patch_size})")
         self.grid = out_size // patch_size
@@ -239,9 +242,19 @@ class GSOMegaposeDataset(IterableDataset):
     def __iter__(self):
         is_train = self.split == "train"
 
+        shard_paths = list(self.shard_paths)
+
+        # Shuffle the shards to show all the data during training
+        if is_train:
+            epoch = self._epoch_counter.value       # Takes from the shared memory
+            logging.info(f"[{self.split}] worker sees epoch={epoch}, first_shard_before_shuffle={self.shard_paths[0]}")
+            random.Random(epoch).shuffle(shard_paths)                                           
+            logging.info(f"[{self.split}] epoch={epoch}, first_shard_after_shuffle={shard_paths[0]}")
+
+
         pipeline = wds.WebDataset(
-            self.shard_paths,
-            shardshuffle=self.shardshuffle if is_train else False,
+            shard_paths,
+            shardshuffle=False,  # self.shardshuffle if is_train else False, 
             #resampled=is_train,
         ).compose(self._expand_objects)
 
@@ -250,3 +263,6 @@ class GSOMegaposeDataset(IterableDataset):
             pipeline = pipeline.shuffle(self.shuffle_buffer)
 
         return iter(pipeline)
+
+
+

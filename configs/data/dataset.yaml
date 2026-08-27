@@ -1,7 +1,7 @@
 _target_: src.data.dataset.GSOMegaposeDataset
-shard_source:  /experiments/riccardop02/exp/mini_gso_10*.tar #  /experiments/riccardop02/exp/mini_gso_50obj_15view.tar   #https://www.paris.inria.fr/archive_ylabbeprojectsdata/megapose/webdatasets/gso_1M/{00000000..00001049}.tar     # local path /../*.tar or if remote URL, use https://host/shards/{00000..99000}.tar
+shard_source: https://www.paris.inria.fr/archive_ylabbeprojectsdata/megapose/webdatasets/gso_1M/{00000000..00001049}.tar  #/experiments/riccardop02/exp/mini_gso_10*.tar #  /experiments/riccardop02/exp/mini_gso_50obj_15view.tar       # local path /../*.tar or if remote URL, use https://host/shards/{00000..99000}.tar
 crop_ratio: 1.02
-shardshuffle: 22    # False to disable
+shardshuffle: 100    # False to disable
 out_size: 224
 mean: [0.485, 0.456, 0.406]
 std: [0.229, 0.224, 0.225]
@@ -11,5 +11,5 @@ visible_frac: 0.8
 
 
 
-val_shards: 0.5
+val_shards: 0.1
 split_seed: 42     

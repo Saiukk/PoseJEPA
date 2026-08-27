@@ -1,21 +1,21 @@
 loader:
-  batch_size: 32            #32
+  batch_size: 64            #32
   num_workers: 4
 
 trainer:
   lr: 1e-4                                # 3e-4
   weight_decay: 0.05                    # 0.05
-  epochs: 1001                        # 50
-  steps_per_epoch: 24                  # 1200
-  val_steps: 100
+  epochs: 500                        # 50
+  steps_per_epoch: 700                  # 1200
+  val_steps: 150
   warmup_frac: 0.03
   min_lr_ratio: 0.01
   log_every: 1                        # 20
-  ckpt_every: 200                      # 5
+  ckpt_every: 5                      # 5
   val_every: 1
   early_stop_patience: 0
   early_stop_min_delta: 0.0
-  resume: null   # PATH TO CHECHPOINT 
+  resume: /experiments/riccardop02/outputs/2026-08-26/07-10-01/checkpoints/best.pt #null  # PATH TO CHECHPOINT 
 
 
 trainable_components: [predictor]
