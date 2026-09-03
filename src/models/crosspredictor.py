@@ -151,27 +151,30 @@ class RayCrossAttnPredictor(nn.Module):
         depth: int,
         mlp_dim: int = None,
         dropout: float = 0.1,
-        fourier_bands: int = 6,
+        pos_fourier_bands: int = 10,
+        dir_fourier_bands: int = 4,
     ):
         super().__init__()
         mlp_dim = mlp_dim if mlp_dim is not None else embed_dim * 4
 
-        self.fourier = FourierEmbedding(num_bands=fourier_bands)
-        fourier_dim = 3 * 2 * fourier_bands                         # (xyz), (sin,cos) <--- Ricorda
+        self.fourier_dir = FourierEmbedding(num_bands=dir_fourier_bands)
+        self.fourier_pos = FourierEmbedding(num_bands=pos_fourier_bands)
+        fourier_dir = 3 * 2 * dir_fourier_bands                         # (xyz), (sin,cos) <--- Ricorda
+        fourier_pos = 3 * 2 * pos_fourier_bands
 
         self.ray_dir_embed = nn.Sequential(
-            nn.Linear(fourier_dim, embed_dim),
+            nn.Linear(fourier_dir, embed_dim),
             nn.GELU(),
             nn.Linear(embed_dim, embed_dim),
         )
         self.ray_moment_embed = nn.Sequential(
-            nn.Linear(fourier_dim, embed_dim),
+            nn.Linear(fourier_pos, embed_dim),
             nn.GELU(),
             nn.Linear(embed_dim, embed_dim),
         )
 
         self.center_embed = nn.Sequential(
-            nn.Linear(fourier_dim, embed_dim),
+            nn.Linear(fourier_pos, embed_dim),
             nn.GELU(),
             nn.Linear(embed_dim, embed_dim),
         )
@@ -200,7 +203,7 @@ class RayCrossAttnPredictor(nn.Module):
 
         logging.info(
             "RayCrossAttnPredictor initialized (depth=%d, FourierBands=%d, plucker=True)",
-            depth, fourier_bands,
+            depth, pos_fourier_bands, dir_fourier_bands,
         )
 
     def _init_weights(self):
@@ -224,13 +227,13 @@ class RayCrossAttnPredictor(nn.Module):
         context_centers: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
 
-        center_fourier = self.fourier(context_centers)
+        center_fourier = self.fourier_pos(context_centers)
         k_v_pos = self.center_embed(center_fourier)
         k_v_feat = self.context_proj(context_features)
         memory_tokens = k_v_feat + k_v_pos
 
-        dir_fourier = self.fourier(ray_dirs)
-        moment_fourier = self.fourier(ray_moments)
+        dir_fourier = self.fourier_dir(ray_dirs)
+        moment_fourier = self.fourier_pos(ray_moments)
         query_tokens = self.ray_dir_embed(dir_fourier) + self.ray_moment_embed(moment_fourier)
 
         out = self.transformer(tgt=query_tokens, memory=memory_tokens)
