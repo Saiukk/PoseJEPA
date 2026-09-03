@@ -119,7 +119,6 @@ class AdaLNPosePredictor(nn.Module):
 #  *     *. *     *     *     #
 ###############################
 
-
 import math
 import torch
 import torch.nn as nn
@@ -134,7 +133,7 @@ class FourierEmbedding(nn.Module):
 
     def forward(self, x):
         x_expanded = x.unsqueeze(-1) * self.freqs
-        emb = torch.cat([torch.sin(x_expanded), torch.cos(x_expanded)], dim=-1)         # concatenate sin and cos embeddings at the last dimension (B, ray, 3, 2*num_bands)
+        emb = torch.cat([torch.sin(x_expanded), torch.cos(x_expanded)], dim=-1)         # (..., 3, 2*num_bands)
         return emb.flatten(-2, -1)
 
 
@@ -160,11 +159,17 @@ class RayCrossAttnPredictor(nn.Module):
         self.fourier = FourierEmbedding(num_bands=fourier_bands)
         fourier_dim = 3 * 2 * fourier_bands                         # (xyz), (sin,cos) <--- Ricorda
 
-        self.ray_embed = nn.Sequential(
+        self.ray_dir_embed = nn.Sequential(
             nn.Linear(fourier_dim, embed_dim),
             nn.GELU(),
             nn.Linear(embed_dim, embed_dim),
         )
+        self.ray_moment_embed = nn.Sequential(
+            nn.Linear(fourier_dim, embed_dim),
+            nn.GELU(),
+            nn.Linear(embed_dim, embed_dim),
+        )
+
         self.center_embed = nn.Sequential(
             nn.Linear(fourier_dim, embed_dim),
             nn.GELU(),
@@ -172,7 +177,6 @@ class RayCrossAttnPredictor(nn.Module):
         )
 
         self.context_proj = nn.Linear(context_dim, embed_dim)
-        self.mask_cond_embed = nn.Linear(1, embed_dim)
 
         decoder_layer = nn.TransformerDecoderLayer(
             d_model=embed_dim,
@@ -190,9 +194,14 @@ class RayCrossAttnPredictor(nn.Module):
         )
 
         self.output_proj = nn.Linear(embed_dim, output_dim)
+        self.occupancy_proj = nn.Linear(embed_dim, 1)
+
         self._init_weights()
 
-        logging.info("RayCrossAttnPredictor initialized (depth=%d, FourierBands=%d)", depth, fourier_bands)
+        logging.info(
+            "RayCrossAttnPredictor initialized (depth=%d, FourierBands=%d, plucker=True)",
+            depth, fourier_bands,
+        )
 
     def _init_weights(self):
         def _init_module(m):
@@ -209,25 +218,26 @@ class RayCrossAttnPredictor(nn.Module):
 
     def forward(
         self,
-        ray_queries: torch.Tensor,
+        ray_dirs: torch.Tensor,       # (B, N, 3) direzione unitaria, gia' ruotata nel frame oggetto
+        ray_moments: torch.Tensor,    # (B, N, 3) momento Plucker O x d, stesso frame
         context_features: torch.Tensor,
         context_centers: torch.Tensor,
-        mask: torch.Tensor = None,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
 
         center_fourier = self.fourier(context_centers)
         k_v_pos = self.center_embed(center_fourier)
         k_v_feat = self.context_proj(context_features)
         memory_tokens = k_v_feat + k_v_pos
 
-        ray_fourier = self.fourier(ray_queries)
-        query_tokens = self.ray_embed(ray_fourier)
-
-        if mask is not None:
-            query_tokens = query_tokens + self.mask_cond_embed(mask.unsqueeze(-1))
+        dir_fourier = self.fourier(ray_dirs)
+        moment_fourier = self.fourier(ray_moments)
+        query_tokens = self.ray_dir_embed(dir_fourier) + self.ray_moment_embed(moment_fourier)
 
         out = self.transformer(tgt=query_tokens, memory=memory_tokens)
-        out = self.output_proj(out)
-        out = F.normalize(out, dim=-1)  
 
-        return out
+        occupancy_logits = self.occupancy_proj(out).squeeze(-1)   # (B, N), logit pre-sigmoid
+
+        content = self.output_proj(out)
+        content = F.normalize(content, dim=-1)
+
+        return content, occupancy_logits

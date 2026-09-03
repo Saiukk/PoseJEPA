@@ -5,17 +5,17 @@ loader:
 trainer:
   lr: 1e-4                                # 3e-4
   weight_decay: 0.05                    # 0.05
-  epochs: 500                        # 50
+  epochs: 250                        # 500
   steps_per_epoch: 700                  # 1200
   val_steps: 150
   warmup_frac: 0.03
   min_lr_ratio: 0.01
   log_every: 1                        # 20
-  ckpt_every: 5                      # 5
+  ckpt_every: 10                      # 5
   val_every: 1
   early_stop_patience: 0
   early_stop_min_delta: 0.0
-  resume: /experiments/riccardop02/outputs/2026-08-26/07-10-01/checkpoints/best.pt #null  # PATH TO CHECHPOINT 
+  resume: null  # PATH TO CHECHPOINT 
 
 
 trainable_components: [predictor]

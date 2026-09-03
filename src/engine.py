@@ -28,7 +28,6 @@ def _output_dir() -> str:
     try:
         return HydraConfig.get().runtime.output_dir
     except ValueError:
-        # HydraConfig not initialized (e.g. class used outside @hydra.main)
         return os.getcwd()
 
 
@@ -40,21 +39,23 @@ class Engine:
         self.is_train = is_train
         self.device = torch.device(cfg.get("device", "cuda:0"))
 
-        # Single source of truth for which components are trainable,
-        # computed once and reused everywhere (build, optimizer, train mode).
         self.trainable_components = list(cfg.train.get("trainable_components", ["predictor"]))
 
         self.models = self._build_models()
-        self.criterion = nn.L1Loss()
 
-        # Soglia su mask_tokens: sotto questa frazione di copertura oggetto,
-        # il token viene escluso dalla loss (sfondo/occlusione -> non apprendibile
-        # dal predictor, che non riceve mai i pixel reali come input).
+        # Peso del termine di occupancy rispetto al content loss.
+        # occupancy_loss e content_loss vivono su scale diverse (BCE vs L1 su
+        # feature ad alta dimensionalita'), quindi lambda va tarato guardando
+        # i due termini separatamente nei log, non assunto = 1 a scatola chiusa.
+        self.lambda_occ = float(cfg.train.get("lambda_occ", 1.0))
+
+        # NOTA: mask_threshold non entra piu' nella loss (ne' content ne' occupancy,
+        # entrambe usano mask_tokens come segnale continuo/soft). Resta solo come
+        # soglia di discretizzazione per metriche interpretabili (IoU) in validazione.
         self.mask_threshold = float(cfg.train.get("mask_threshold", 0.5))
 
         self.loader = self._build_dataloader(split="train")
 
-        # only set if is_train=True, otherwise stay None
         self.optimizer = None
         self.scheduler = None
         self.epochs = None
@@ -83,7 +84,6 @@ class Engine:
                 self.load_checkpoint(checkpoint, strict=True)
             for m in self.models.values():
                 m.eval()
-
 
     # Build..
 
@@ -118,7 +118,6 @@ class Engine:
                 return None
             raise ValueError(f"No shard found for split='{split}'")
 
-        # Limit max number of workers
         num_workers = min(self.cfg.train.loader.num_workers, n_shards)
         if num_workers != self.cfg.train.loader.num_workers:
             log.warning(
@@ -131,7 +130,7 @@ class Engine:
             batch_size=self.cfg.train.loader.batch_size,
             num_workers=num_workers,
             pin_memory=True,
-            persistent_workers=num_workers > 0,   # non rispawna i worker (e non riapre i tar) ogni epoca
+            persistent_workers=num_workers > 0,
         )
         log.info("[%s] Dataloader: %d shard, %d worker", split, n_shards, num_workers)
         return loader
@@ -151,7 +150,6 @@ class Engine:
             weight_decay=trainer_cfg.get("weight_decay", 0.05),
         )
 
-
         self.epochs = trainer_cfg.get("epochs", 50)
         self.steps_per_epoch = trainer_cfg.get("steps_per_epoch", 2000)
         self.val_steps = trainer_cfg.get("val_steps", 100)
@@ -159,11 +157,9 @@ class Engine:
         self.ckpt_every = trainer_cfg.get("ckpt_every", 5)
         self.val_every = trainer_cfg.get("val_every", 1)
 
-        # patient (early_stop_patience = 0 if no early stopping)
         self.early_stop_patience = trainer_cfg.get("early_stop_patience", None)
         self.early_stop_min_delta = float(trainer_cfg.get("early_stop_min_delta", 0.0))
 
-        # SCHEDULER: warmup lineare + cosine, step per iterazione (non per epoca)
         self.total_steps = self.epochs * self.steps_per_epoch
         warmup_steps = max(1, int(self.total_steps * trainer_cfg.get("warmup_frac", 0.03)))
         min_lr_ratio = float(trainer_cfg.get("min_lr_ratio", 0.01))
@@ -173,7 +169,7 @@ class Engine:
                 return step / warmup_steps
             progress = min(1.0, (step - warmup_steps) / max(1, self.total_steps - warmup_steps))
             cosine = 0.5 * (1.0 + math.cos(math.pi * progress))
-            return min_lr_ratio + (1.0 - min_lr_ratio) * cosine   
+            return min_lr_ratio + (1.0 - min_lr_ratio) * cosine
 
         self.scheduler = torch.optim.lr_scheduler.LambdaLR(self.optimizer, _lr_lambda)
         log.info(
@@ -190,11 +186,10 @@ class Engine:
             self.global_step = ckpt.get("global_step", self.start_epoch * self.steps_per_epoch)
             self.epochs_without_improvement = ckpt.get("epochs_without_improvement", 0)
 
-            # lo scheduler dipende solo da global_step, ma se ho lo state lo uso
             if ckpt.get("scheduler") is not None:
                 self.scheduler.load_state_dict(ckpt["scheduler"])
             else:
-                for _ in range(self.global_step):   # checkpoint vecchi, riavvolgo a mano
+                for _ in range(self.global_step):
                     self.scheduler.step()
 
             best_path = os.path.join(os.path.dirname(resume), "best.pt")
@@ -221,7 +216,7 @@ class Engine:
             name=wandb_cfg.get("name", None),
             mode=wandb_cfg.get("mode", "online"),
             tags=wandb_cfg.get("tags", None),
-            dir=_output_dir(),  # same dir as the Hydra run, regardless of job.chdir
+            dir=_output_dir(),
             config=OmegaConf.to_container(self.cfg, resolve=True),
             id=run_id,
             resume="allow" if run_id else None,
@@ -251,7 +246,7 @@ class Engine:
                 payload = {"epoch": epoch}
                 payload.update({f"train/{k}": v for k, v in train_metrics.items()})
                 payload.update({f"val/{k}": v for k, v in val_metrics.items()})
-                wandb.log(payload, step=self.global_step)   # asse = global_step, non epoch
+                wandb.log(payload, step=self.global_step)
 
             is_best = False
             if val_metrics:
@@ -282,93 +277,119 @@ class Engine:
         )
         return True
 
-    # --- helper per la loss/cos filtrate sui soli token "on-object" ---
+    # --- loss: content (pesata, continua) + occupancy (BCE soft, esplicita) ---
     #
-    # Il predictor non riceve mai i pixel reali come input (solo raggio, mask,
-    # contesto 3D) quindi non ha modo di indovinare cosa DINOv2 vede nei token
-    # di sfondo/occlusione. Includerli nella loss diluisce il gradiente utile
-    # con un segnale strutturalmente non apprendibile. mask_tokens (frazione
-    # di copertura oggetto per patch, già presente nel dataset) è usata qui
-    # per escluderli, SENZA cambiare la formula L1 stessa.
+    # mask_tokens (B, N) e' una frazione continua in [0,1] (viene da un resize
+    # BOX sulla maschera binaria, quindi e' gia' un soft-label naturale). Non
+    # usiamo piu' una soglia per decidere "dentro/fuori" dalla loss:
+    # - il CONTENUTO pesa ogni token in proporzione alla sua copertura reale
+    #   (un bordo al 30% conta poco, uno al 95% conta quasi come pieno):
+    #   niente piu' cutoff binario che amplifica il rumore del segmentatore.
+    # - l'OCCUPANCY e' un head separato, allenato a rigenerare mask_tokens
+    #   stesso: e' il predittore che ora deve imparare "dove" va l'oggetto
+    #   sotto una data R, non piu' un'informazione che riceve gratis in input.
 
     @staticmethod
-    def _masked_l1(pred: torch.Tensor, target: torch.Tensor, valid_mask: torch.Tensor) -> torch.Tensor:
-        """L1 pura, mediata solo sui token con valid_mask=True. pred/target: (B, N, D)."""
+    def _weighted_l1(pred: torch.Tensor, target: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
+        """L1 per-token pesata da weight (continuo, non binario). pred/target: (B, N, D), weight: (B, N)."""
         per_token = F.l1_loss(pred, target, reduction="none").mean(dim=-1)  # (B, N)
-        valid = valid_mask.float()
-        denom = valid.sum().clamp(min=1.0)
-        return (per_token * valid).sum() / denom
+        denom = weight.sum().clamp(min=1e-6)
+        return (per_token * weight).sum() / denom
 
     @staticmethod
-    def _masked_cos(pred: torch.Tensor, target: torch.Tensor, valid_mask: torch.Tensor) -> torch.Tensor:
-        """Cosine similarity media, solo sui token con valid_mask=True."""
+    def _weighted_cos(pred: torch.Tensor, target: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
+        """Cosine similarity media, pesata da weight (continuo)."""
         per_token = F.cosine_similarity(pred, target, dim=-1)  # (B, N)
-        valid = valid_mask.float()
-        denom = valid.sum().clamp(min=1.0)
-        return (per_token * valid).sum() / denom
+        denom = weight.sum().clamp(min=1e-6)
+        return (per_token * weight).sum() / denom
 
     @staticmethod
-    def _baseline_l1(target: torch.Tensor, valid_mask: torch.Tensor) -> float:
-        """L1 del miglior predittore costante, calcolata solo sui token on-object
-        (altrimenti la baseline e la loss del modello non sarebbero confrontabili:
-        loss_ratio andrebbe a confrontare cose diverse)."""
-        valid = valid_mask.bool()
+    def _baseline_l1(target: torch.Tensor, weight: torch.Tensor) -> float:
+        """L1 del miglior predittore costante (mediana pesata approssimata con
+        soglia solo qui, per avere una baseline scalare semplice da confrontare)."""
+        valid = (weight > 0.5)
         target_valid = target[valid] if valid.any() else target.reshape(-1, target.shape[-1])
         median = target_valid.median(dim=0, keepdim=True).values
         return F.l1_loss(median.expand_as(target_valid), target_valid).item()
 
+    def _compute_losses(self, pred_content, pred_occ_logits, target, mask_tokens):
+        """
+        pred_content: (B, N, D) - output del predictor, spazio DINOv2
+        pred_occ_logits: (B, N) - logit dell'occupancy head (pre-sigmoid)
+        target: (B, N, D) - DINOv2 frozen, MAI mascherato/alterato
+        mask_tokens: (B, N) - frazione continua di copertura oggetto, GT
+        """
+        content_loss = self._weighted_l1(pred_content, target, mask_tokens)
+
+        # soft-BCE: mask_tokens come probabilita' target, non come cutoff
+        occupancy_loss = F.binary_cross_entropy_with_logits(pred_occ_logits, mask_tokens)
+
+        total = content_loss + self.lambda_occ * occupancy_loss
+        return total, content_loss, occupancy_loss
+
     def train_epoch(self, epoch: int) -> dict:
         self._set_train_mode()
-        self.loader.dataset._epoch_counter.value = epoch            # For the workes that has to shuflle the shard with the same seed 
-        running_loss, running_cos, n_batches = 0.0, 0.0, 0
+        self.loader.dataset._epoch_counter.value = epoch
+        running = {"loss": 0.0, "content_loss": 0.0, "occ_loss": 0.0, "cos": 0.0}
+        n_batches = 0
         start_time = time.time()
         total_steps = self.steps_per_epoch
 
         for step, batch in enumerate(self.loader):
 
-            # l'epoca virtuale finisce qui
             if step >= self.steps_per_epoch:
                 break
 
             batch = self._to_device(batch)
 
             self.optimizer.zero_grad(set_to_none=True)
-            pred, target = self._forward(batch)
+            pred_content, pred_occ_logits, target = self._forward(batch)
 
-            valid_mask = batch["mask_tokens"] > self.mask_threshold
-            loss = self._masked_l1(pred, target, valid_mask)
+            mask_tokens = batch["mask_tokens"]
+            loss, content_loss, occ_loss = self._compute_losses(
+                pred_content, pred_occ_logits, target, mask_tokens
+            )
 
-            # metrica interpretabile: 0 = predizione ortogonale al target, 1 = perfetta.
-            # solo logging, non entra nel backward.
             with torch.no_grad():
-                cos = self._masked_cos(pred, target, valid_mask).item()
+                cos = self._weighted_cos(pred_content, target, mask_tokens).item()
 
             loss.backward()
             self.optimizer.step()
             self.scheduler.step()
             self.global_step += 1
 
-            running_loss += loss.item()
-            running_cos += cos
+            running["loss"] += loss.item()
+            running["content_loss"] += content_loss.item()
+            running["occ_loss"] += occ_loss.item()
+            running["cos"] += cos
             n_batches += 1
+
             if step % self.log_every == 0:
                 lr = self.optimizer.param_groups[0]["lr"]
-                log.info("epoch %d step %d/%d loss=%.4f cos=%.4f lr=%.2e",
-                         epoch, step, total_steps, loss.item(), cos, lr)
+                log.info(
+                    "epoch %d step %d/%d loss=%.4f content=%.4f occ=%.4f cos=%.4f lr=%.2e",
+                    epoch, step, total_steps, loss.item(), content_loss.item(),
+                    occ_loss.item(), cos, lr,
+                )
                 if self.wandb_run is not None:
-                    wandb.log({"train/loss_step": loss.item(),
-                               "train/cos_step": cos,
-                               "train/lr": lr},
-                              step=self.global_step)
+                    wandb.log({
+                        "train/loss_step": loss.item(),
+                        "train/content_loss_step": content_loss.item(),
+                        "train/occ_loss_step": occ_loss.item(),
+                        "train/cos_step": cos,
+                        "train/lr": lr,
+                    }, step=self.global_step)
 
         elapsed = time.time() - start_time
         seen = n_batches * self.cfg.train.loader.batch_size
         n = max(n_batches, 1)
         return {
-            "loss": running_loss / n,
-            "cos": running_cos / n,
+            "loss": running["loss"] / n,
+            "content_loss": running["content_loss"] / n,
+            "occ_loss": running["occ_loss"] / n,
+            "cos": running["cos"] / n,
             "time_s": round(elapsed, 1),
-            "samples_per_s": round(seen / max(elapsed, 1e-6), 1),   # per tarare steps_per_epoch
+            "samples_per_s": round(seen / max(elapsed, 1e-6), 1),
         }
 
     @torch.no_grad()
@@ -379,8 +400,13 @@ class Engine:
         for m in self.models.values():
             m.eval()
 
-        running_loss, running_loss_perm, n_batches = 0.0, 0.0, 0
-        running_cos, running_cos_perm, running_baseline = 0.0, 0.0, 0.0
+        agg = {
+            "loss": 0.0, "loss_perm": 0.0,
+            "cos": 0.0, "cos_perm": 0.0,
+            "occ_iou": 0.0, "occ_iou_perm": 0.0,
+            "baseline_l1": 0.0,
+        }
+        n_batches = 0
         start_time = time.time()
 
         for batch in self.val_loader:
@@ -389,15 +415,21 @@ class Engine:
                 break
 
             batch = self._to_device(batch)
-            valid_mask = batch["mask_tokens"] > self.mask_threshold
+            mask_tokens = batch["mask_tokens"]
 
-            pred, target = self._forward(batch)
-            loss = self._masked_l1(pred, target, valid_mask)
-            running_loss += loss.item()
-            running_cos += self._masked_cos(pred, target, valid_mask).item()
+            pred_content, pred_occ_logits, target = self._forward(batch)
+            loss, _, _ = self._compute_losses(pred_content, pred_occ_logits, target, mask_tokens)
+            agg["loss"] += loss.item()
+            agg["cos"] += self._weighted_cos(pred_content, target, mask_tokens).item()
+            agg["baseline_l1"] += self._baseline_l1(target, mask_tokens)
 
-            # loss del miglior predittore costante: la soglia da battere
-            running_baseline += self._baseline_l1(target, valid_mask)
+            # IoU tra occupancy predetta (con R vera) e GT, entrambe discretizzate
+            # solo qui per avere una metrica interpretabile in [0,1].
+            occ_pred_bin = (torch.sigmoid(pred_occ_logits) > self.mask_threshold)
+            occ_gt_bin = (mask_tokens > self.mask_threshold)
+            inter = (occ_pred_bin & occ_gt_bin).float().sum(dim=1)
+            union = (occ_pred_bin | occ_gt_bin).float().sum(dim=1).clamp(min=1e-6)
+            agg["occ_iou"] += (inter / union).mean().item()
 
             # --- controllo: rotazione permutata nel batch ---
             B = target.shape[0]
@@ -405,14 +437,19 @@ class Engine:
             if B > 1 and (perm == torch.arange(B, device=target.device)).all():
                 perm = perm.roll(1)
 
-            # Calcola la predizione usando la matrice R di altri oggetti (permutata)
             R_mat = batch["rot_matrix"]
-            pred_perm, _ = self._forward(batch, override_R=R_mat[perm])
+            pred_content_perm, pred_occ_logits_perm, _ = self._forward(batch, override_R=R_mat[perm])
 
-            # stessa valid_mask: la maschera dipende dalla segmentazione del
-            # sample, non dalla posa usata per generare i raggi
-            running_loss_perm += self._masked_l1(pred_perm, target, valid_mask).item()
-            running_cos_perm += self._masked_cos(pred_perm, target, valid_mask).item()
+            loss_perm, _, _ = self._compute_losses(
+                pred_content_perm, pred_occ_logits_perm, target, mask_tokens
+            )
+            agg["loss_perm"] += loss_perm.item()
+            agg["cos_perm"] += self._weighted_cos(pred_content_perm, target, mask_tokens).item()
+
+            occ_pred_perm_bin = (torch.sigmoid(pred_occ_logits_perm) > self.mask_threshold)
+            inter_p = (occ_pred_perm_bin & occ_gt_bin).float().sum(dim=1)
+            union_p = (occ_pred_perm_bin | occ_gt_bin).float().sum(dim=1).clamp(min=1e-6)
+            agg["occ_iou_perm"] += (inter_p / union_p).mean().item()
 
             n_batches += 1
 
@@ -420,11 +457,11 @@ class Engine:
         self._set_train_mode()
 
         n = max(n_batches, 1)
-        loss_true = running_loss / n
-        loss_perm = running_loss_perm / n
-        cos_true = running_cos / n
-        cos_perm = running_cos_perm / n
-        baseline = running_baseline / n
+        loss_true = agg["loss"] / n
+        loss_perm = agg["loss_perm"] / n
+        cos_true = agg["cos"] / n
+        cos_perm = agg["cos_perm"] / n
+        baseline = agg["baseline_l1"] / n
 
         return {
             "loss": loss_true,
@@ -432,71 +469,72 @@ class Engine:
             "gap_R": (loss_perm - loss_true) / max(loss_perm, 1e-8),
             "cos": cos_true,
             "cos_perm": cos_perm,
-            # differenza assoluta di coseni: non viene schiacciata dalla componente
-            # banale della loss, a differenza di gap_R
             "gap_cos": cos_true - cos_perm,
+            # nuova metrica: quanto l'occupancy predetta segue la vera R
+            # rispetto a una R sbagliata (permutata). Isola "sa dove va
+            # l'oggetto" da "sa cosa c'e' dentro" (gap_cos).
+            "occ_iou": agg["occ_iou"] / n,
+            "occ_iou_perm": agg["occ_iou_perm"] / n,
+            "gap_occ_iou": (agg["occ_iou"] - agg["occ_iou_perm"]) / n,
             "baseline_l1": baseline,
-            # < 1 -> il modello batte il predittore costante. >= 1 -> non serve a niente.
             "loss_ratio": loss_true / max(baseline, 1e-8),
             "time_s": round(elapsed, 1),
         }
 
     def _to_device(self, batch: dict) -> dict:
-        """Move every tensor in the batch to self.device; leave non-tensor fields (strings) as-is."""
         return {
             k: v.to(self.device, non_blocking=True) if torch.is_tensor(v) else v
             for k, v in batch.items()
         }
 
     @staticmethod
-    def _generate_rays(K: torch.Tensor, R: torch.Tensor, grid_size: int = 16, patch_size: int = 14) -> torch.Tensor:
-        
+    def _generate_rays(K, R, trans, grid_size=16, patch_size=14):
         B = K.shape[0]
         device = K.device
 
         y = torch.arange(grid_size, device=device, dtype=torch.float32)
         x = torch.arange(grid_size, device=device, dtype=torch.float32)
         grid_y, grid_x = torch.meshgrid(y, x, indexing='ij')
-        
+
         u = grid_x * patch_size + (patch_size / 2.0)
         v = grid_y * patch_size + (patch_size / 2.0)
-        
+
         uv1 = torch.stack([u, v, torch.ones_like(u)], dim=-1).reshape(-1, 3)
-        uv1 = uv1.unsqueeze(0).expand(B, -1, -1)  # (B, 256, 3)
+        uv1 = uv1.unsqueeze(0).expand(B, -1, -1)
 
         K_inv = torch.linalg.inv(K)
-        d_c = torch.bmm(uv1, K_inv.transpose(1, 2))  
+        d_c = torch.bmm(uv1, K_inv.transpose(1, 2))
 
         R_inv = R.transpose(1, 2)
-        d_o = torch.bmm(d_c, R_inv.transpose(1, 2))  # Object space rays
+        d_o = F.normalize(torch.bmm(d_c, R_inv.transpose(1, 2)), p=2, dim=-1)   # (B, N, 3)
 
-        return F.normalize(d_o, p=2, dim=-1)
+        O = -torch.bmm(R_inv, trans.unsqueeze(-1)).squeeze(-1)                 # (B, 3)
+        O_exp = O.unsqueeze(1).expand(-1, d_o.shape[1], -1)
+        moment = torch.cross(O_exp, d_o, dim=-1)                               # (B, N, 3)
 
-    def _forward(self, batch: dict, override_R: torch.Tensor = None):
-        """Run encoder2d (frozen, target) and predictor (trainable, prediction)."""
+        return d_o, moment
+
+    def _forward(self, batch, override_R=None):
         img = batch["image"]
         K = batch["K"]
-        m = batch["mask_tokens"]
+        trans = batch["trans"]
         context_features = batch["context_3d"]
         context_centers = batch["center_3d"]
-        
-        # Se non passiamo una R forzata (permutata), usiamo quella Ground Truth
-        R_mat = override_R if override_R is not None else batch["rot_matrix"]
 
-        # Generiamo i raggi differenziabili
-        ray_dirs = self._generate_rays(K, R_mat, grid_size=16, patch_size=14)
+        R_mat = override_R if override_R is not None else batch["rot_matrix"]
+        ray_dirs, ray_moments = self._generate_rays(K, R_mat, trans, grid_size=16, patch_size=14)
 
         with torch.no_grad():
-            target = self.models["encoder2d"](img)   # frozen, no grad needed
+            target = self.models["encoder2d"](img)
 
-        pred = self.models["predictor"](
-            ray_queries=ray_dirs, 
-            context_features=context_features, 
-            context_centers=context_centers, 
-            mask=m
+        pred_content, pred_occ_logits = self.models["predictor"](
+            ray_dirs=ray_dirs,
+            ray_moments=ray_moments,
+            context_features=context_features,
+            context_centers=context_centers,
         )
 
-        return pred, target
+        return pred_content, pred_occ_logits, target
 
     def _set_train_mode(self):
         for name, m in self.models.items():
@@ -521,7 +559,6 @@ class Engine:
             best_path = os.path.join(ckpt_dir, "best.pt")
             torch.save(payload, best_path)
             log.info("New best checkpoint (val_loss=%.4f): %s", val_loss, best_path)
-
         else:
             path = os.path.join(ckpt_dir, f"epoch_{epoch:04d}.pt")
             torch.save(payload, path)
