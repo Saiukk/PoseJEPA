@@ -12,20 +12,11 @@ from .render_utils import render_random_view
 
 log = logging.getLogger(__name__)
 
-# Statistiche di normalizzazione DINOv2 (== ImageNet mean/std, usate da
-# AutoImageProcessor.from_pretrained("facebook/dinov2-base")).
-# NOTA: se in futuro cambi encoder2d.model_name con un checkpoint che usa
-# statistiche diverse, queste costanti vanno riallineate di conseguenza.
 DINOV2_MEAN = (0.485, 0.456, 0.406)
 DINOV2_STD = (0.229, 0.224, 0.225)
 
 
 def _stable_seed(*parts: object) -> int:
-    """
-    Hash deterministico cross-processo (a differenza di hash() built-in,
-    che e' salato per processo via PYTHONHASHSEED e quindi NON riproducibile
-    dopo un resume/restart del training).
-    """
     s = "_".join(str(p) for p in parts)
     return int(hashlib.md5(s.encode()).hexdigest()[:8], 16)
 
@@ -33,7 +24,6 @@ def _stable_seed(*parts: object) -> int:
 def compute_context(model_name, dataset_source, cache_context):
     """
     Compute the 3D context for a given model name.
-    Ritorna None se l'embedding non c'e' -> l'oggetto viene skippato.
     """
     model_name = model_name.replace("gso_", "")
     if cache_context:
@@ -67,12 +57,7 @@ def split_model_names(
     val_ratio: float = 0.1,
     split_seed: int = 42,
 ) -> tuple[list[str], list[str]]:
-    """
-    Split riproducibile train/val sulla lista di oggetti.
-    Priorita': se val_count e' specificato, usa quello (numero assoluto di oggetti
-    in validation). Altrimenti usa val_ratio (frazione del totale).
-    Lo split dipende solo da split_seed, quindi e' identico ad ogni run/epoca/worker.
-    """
+
     rng = random.Random(split_seed)
     shuffled = list(model_names)
     rng.shuffle(shuffled)
@@ -133,16 +118,8 @@ class RenderDataset(Dataset):
                 f"rispetto al numero totale di oggetti ({len(all_names)})."
             )
 
-        # usato da Engine._build_dataloader per calcolare num_workers
-        # (un "shard" = un oggetto, dato che ogni oggetto e' indipendente)
         self.shard_paths = self.model_names
-
-        # contatore epoca condiviso tra i worker del DataLoader, per far variare
-        # il sampling delle pose ad ogni epoca in modo deterministico
         self._epoch_counter = multiprocessing.Value("i", 0)
-
-        # cache in RAM: features+centers+centroid+scale pesano poco, tienili in
-        # memoria per oggetto invece di rileggere il .npz ad ogni __getitem__
         self._context_cache: dict[str, tuple] = {}
 
         # normalizzazione DINOv2, precomputata come tensori (broadcast su C,H,W)
@@ -170,16 +147,13 @@ class RenderDataset(Dataset):
         return self._context_cache[model_name]
 
     def __getitem__(self, idx: int) -> dict:
-        model_idx = idx % len(self.model_names)
+        model_idx = idx % len(self.model_names)         # use module to restart model selection every views_per_epoch
         model_name = self.model_names[model_idx]
 
         context_3d, center_3d, centroid, scale = self._get_context(model_name)
 
-        # seed deterministico cross-processo: stessa epoca + stesso idx ->
-        # stessa posa campionata, ANCHE dopo uno stop/resume del training
-        # (a differenza di hash() built-in, che e' salato per processo).
         epoch = self._epoch_counter.value
-        seed = _stable_seed(model_name, epoch, idx) & 0xFFFFFFFF
+        seed = _stable_seed(model_name, epoch, idx) & 0xFFFFFFFF        # Per la riproducibilità
         rng = np.random.default_rng(seed)
 
         image, mask, K, R, t = render_random_view(
@@ -191,17 +165,14 @@ class RenderDataset(Dataset):
             rng=rng,
         )
 
-        # image e' RGB grezzo in [0,1] (3, H, W), sfondo forzato a zero da
-        # render_random_view. Normalizza con le statistiche DINOv2 PRIMA di
-        # passarla all'encoder2d (che si aspetta input gia' normalizzato,
-        # niente resize qui: la griglia patch deve restare allineata ai raggi).
+        # Dino setup
         image_t = torch.from_numpy(image).float()
         image_t = (image_t - self._dino_mean) / self._dino_std
 
         return {
             "model_name": model_name,
-            "image": image_t,                                   # (3, H, W) normalizzata DINOv2
-            "mask": torch.from_numpy(mask).float(),             # (H, W) silhouette, non usata nella loss di Fase 1
+            "image": image_t,                                   # (3, H, W)
+            "mask": torch.from_numpy(mask).float(),             # (H, W) 
             "context_3d": torch.from_numpy(context_3d).float(),
             "center_3d": torch.from_numpy(center_3d).float(),
             "centroid": torch.from_numpy(centroid).float(),

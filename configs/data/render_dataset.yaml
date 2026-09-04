@@ -1,3 +1,11 @@
-_target_: src.data.dataset.RenderDataset
+_target_: src.data.Render_Dataset.RenderDataset
 
-split_seed: 42     
+cache_context: true
+val_count: null
+val_ratio: 0.1
+split_seed: 42
+grid_size: 16
+patch_size: 14
+image_size: 224
+views_per_epoch: 8
+  

@@ -1,12 +1,3 @@
-"""
-Rendering on-the-fly per RenderDataset.
-
-ATTENZIONE: questo e' uno scheletro funzionante ma con scelte di default
-(range distanza/elevazione camera, luci, sfondo) che vanno tarate sul tuo
-setup specifico -- non sono state discusse nel dettaglio, quindi trattale
-come punto di partenza, non come valori definitivi.
-"""
-
 import logging
 import os
 
@@ -46,17 +37,22 @@ def load_gso_mesh(model_dir: str) -> trimesh.Trimesh:
     return mesh
 
 
-def _sample_camera_pose(centroid: np.ndarray, scale: float, rng: np.random.Generator):
-    """
-    Campiona una posa random della camera su una shell sferica attorno al
-    centroide dell'oggetto (frame mesh originale), guardando verso il centroide.
+def _sample_camera_pose(
+    centroid: np.ndarray,
+    scale: float,
+    rng: np.random.Generator,
+    fov_y: float,
+    frac_range=(0.15, 0.70),
+):
+    frac = rng.uniform(*frac_range)
+    # angolo (rad) che l'oggetto deve sottendere in verticale per occupare
+    # la frazione "frac" del frame, dato il FOV verticale gia' scelto
+    theta = np.clip(frac * fov_y, 1e-3, np.pi - 1e-3)
+    radius = scale / np.tan(theta / 2.0)
 
-    TODO: tara questi range sul tuo dataset (dimensioni reali GSO, FOV camera).
-    """
-    radius = rng.uniform(2.0 * scale, 4.0 * scale)          # distanza camera-oggetto
     azimuth = rng.uniform(0, 2 * np.pi)
-    elevation = rng.uniform(-0.3, 0.9)                       # rad, evita viste da sotto
-
+    elevation = np.arcsin(rng.uniform(-1.0, 1.0))  # rad, full-sphere uniforme
+    
     cam_pos = centroid + radius * np.array([
         np.cos(elevation) * np.cos(azimuth),
         np.cos(elevation) * np.sin(azimuth),
@@ -81,17 +77,8 @@ def _sample_camera_pose(centroid: np.ndarray, scale: float, rng: np.random.Gener
     return R.astype(np.float32), t.astype(np.float32)
 
 
-def _sample_intrinsics(image_size: int, rng: np.random.Generator, fov_range=(35, 55), cxcy_jitter_frac=0.03):
-    """
-    Campiona intrinseci random per la camera: FOV variabile (quindi focale variabile)
-    e piccolo jitter sul principal point.
-
-    fov_range: (min_deg, max_deg) — TODO: allinealo al FOV reale delle camere
-    che userai in inference (BOP/CNOS), non lasciarlo un range arbitrario.
-    cxcy_jitter_frac: jitter di cx,cy come frazione di image_size (0 = sempre
-    centrato esatto, valori tipici 0.02-0.05 simulano principal point reale
-    non perfettamente centrato).
-    """
+def _sample_intrinsics(image_size: int, rng: np.random.Generator, fov_range=(25, 70), cxcy_jitter_frac=0.03):
+    
     fov_y = np.deg2rad(rng.uniform(*fov_range))
     f = image_size / (2.0 * np.tan(fov_y / 2.0))
 
@@ -115,8 +102,10 @@ def render_random_view(
     scale: float,
     image_size: int = 224,
     rng: np.random.Generator = None,
-    fov_range=(35, 55),
+    fov_range=(25, 70),
     cxcy_jitter_frac: float = 0.03,
+    frac_range=(0.15, 0.70),
+    light_intensity_range=(2.5, 3.5),
 ):
     """
     Renderizza una vista random dell'oggetto (frame mesh originale, non normalizzato).
@@ -140,14 +129,14 @@ def render_random_view(
     scene = pyrender.Scene(bg_color=[1.0, 1.0, 1.0, 0.0], ambient_light=[0.4, 0.4, 0.4])
     scene.add(render_mesh)
 
-    R, t = _sample_camera_pose(centroid.astype(np.float64), float(scale), rng)
+    # FOV campionato per primo: serve a _sample_camera_pose per ricavare
+    # il radius coerente (vedi punto 1 in cima al file).
     K, fov_y = _sample_intrinsics(image_size, rng, fov_range=fov_range, cxcy_jitter_frac=cxcy_jitter_frac)
+    R, t = _sample_camera_pose(
+        centroid.astype(np.float64), float(scale), rng, fov_y=fov_y, frac_range=frac_range
+    )
     f, cx, cy = K[0, 0], K[0, 2], K[1, 2]
 
-    # pyrender.PerspectiveCamera centra sempre il principal point sul canvas.
-    # Per ottenere cx,cy != centro (e restare coerenti con la K dichiarata),
-    # renderizziamo un canvas piu' grande, centrato per costruzione, e poi
-    # ritagliamo la finestra image_size x image_size nel punto giusto.
     pad = int(np.ceil(cxcy_jitter_frac * image_size)) + 1
     render_w = render_h = image_size + 2 * pad
 
@@ -166,7 +155,11 @@ def render_random_view(
 
     scene.add(camera, pose=cam_pose)
 
-    light = pyrender.DirectionalLight(color=np.ones(3), intensity=3.0)  # TODO: tara intensita'/randomizza
+    # intensita' luce randomizzata ma con variazione stretta: la posa della
+    # luce e' gia' agganciata alla posa camera (quindi e' funzione dei
+    # raggi, non una variabile nascosta), solo l'intensita' era libera.
+    light_intensity = rng.uniform(*light_intensity_range)
+    light = pyrender.DirectionalLight(color=np.ones(3), intensity=light_intensity)
     scene.add(light, pose=cam_pose)
 
     renderer = pyrender.OffscreenRenderer(render_w, render_h)
@@ -189,10 +182,7 @@ def render_random_view(
     mask = (depth_crop > 0).astype(np.float32)
 
     rgb = color_crop[..., :3].astype(np.float32) / 255.0
-    # bg_color/alpha di pyrender non e' affidabile per garantire sfondo nero
-    # (bg_color qui e' bianco, l'alpha viene ignorato a valle): azzeriamo
-    # esplicitamente i pixel di sfondo usando la mask, cosi' il nero e'
-    # garantito indipendentemente dal comportamento interno del renderer.
+
     rgb = rgb * mask[..., None]
 
     image = np.transpose(rgb, (2, 0, 1))  # (3, H, W)

@@ -2,7 +2,7 @@ defaults:
   - encoder2d: dinov2
   - encoder3d: uni3d
   - Predictor: predictor
-  - data: dataset
+  - data: render_dataset
   - train: train
   - wandb: wandb
   - _self_
