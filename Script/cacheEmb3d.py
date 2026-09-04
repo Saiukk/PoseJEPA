@@ -94,7 +94,7 @@ def normalize_pointcloud(pc: np.ndarray) -> np.ndarray:
 
     rgb = (rgb / 255.0 - 0.5) / 0.5
 
-    return np.concatenate([xyz, rgb], axis=-1).astype(np.float32)
+    return np.concatenate([xyz, rgb], axis=-1).astype(np.float32), centroid, scale
 
 
 
@@ -103,14 +103,14 @@ def process_model(model_dir: str, encoder3d, n_points: int, device: torch.device
 
     mesh = load_gso_mesh(model_dir)
     pc = sample_pointcloud_with_color(mesh, n_points)
-    pc = normalize_pointcloud(pc)
+    pc, centroid, scale = normalize_pointcloud(pc)
 
     pc_tensor = torch.from_numpy(pc).unsqueeze(0).to(device)  # (1, N, 6)
 
     with torch.no_grad():
         feats, centers = encoder3d.extractFeatures(pc_tensor)  # (1, num_group, trans_dim)
 
-    return feats.squeeze(0).cpu().numpy(), centers.squeeze(0).cpu().numpy()  # (num_group, trans_dim), (num_group, 3)
+    return feats.squeeze(0).cpu().numpy(), centers.squeeze(0).cpu().numpy(), centroid.squeeze(), scale  # (num_group, trans_dim), (num_group, 3)
 
 
 
@@ -149,9 +149,9 @@ def main(cfg: DictConfig):
             continue
 
         try:
-            feats, centers = process_model(model_dir, encoder3d, n_points, device)
-            np.savez(out_path, features=feats, centers=centers)
-            log.info(f"[OK]   {name}: feats={feats.shape}, centers={centers.shape} -> {out_path}")
+            feats, centers, centroid, scale = process_model(model_dir, encoder3d, n_points, device)
+            np.savez(out_path, features=feats, centers=centers, centroid=centroid, scale=scale)
+            log.info(f"[OK]   {name}: feats={feats.shape}, centers={centers.shape} -> {out_path}, (centroid, scale) = ({centroid}, {scale})")
             n_ok += 1
         except Exception as e:
             log.error(f"[FAIL] {name}: {e}")

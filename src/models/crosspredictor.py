@@ -197,7 +197,6 @@ class RayCrossAttnPredictor(nn.Module):
         )
 
         self.output_proj = nn.Linear(embed_dim, output_dim)
-        self.occupancy_proj = nn.Linear(embed_dim, 1)
 
         self._init_weights()
 
@@ -225,7 +224,7 @@ class RayCrossAttnPredictor(nn.Module):
         ray_moments: torch.Tensor,    # (B, N, 3) momento Plucker O x d, stesso frame
         context_features: torch.Tensor,
         context_centers: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> torch.Tensor:
 
         center_fourier = self.fourier_pos(context_centers)
         k_v_pos = self.center_embed(center_fourier)
@@ -238,9 +237,7 @@ class RayCrossAttnPredictor(nn.Module):
 
         out = self.transformer(tgt=query_tokens, memory=memory_tokens)
 
-        occupancy_logits = self.occupancy_proj(out).squeeze(-1)   # (B, N), logit pre-sigmoid
-
         content = self.output_proj(out)
         content = F.normalize(content, dim=-1)
 
-        return content, occupancy_logits
+        return content

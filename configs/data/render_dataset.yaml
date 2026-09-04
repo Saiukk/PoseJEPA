@@ -1,0 +1,3 @@
+_target_: src.data.dataset.RenderDataset
+
+split_seed: 42     

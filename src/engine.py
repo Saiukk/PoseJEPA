@@ -17,13 +17,6 @@ from torch.utils.data import DataLoader
 log = logging.getLogger(__name__)
 
 
-def _safe_len(x):
-    try:
-        return len(x)
-    except TypeError:
-        return None
-
-
 def _output_dir() -> str:
     try:
         return HydraConfig.get().runtime.output_dir
@@ -43,16 +36,7 @@ class Engine:
 
         self.models = self._build_models()
 
-        # Peso del termine di occupancy rispetto al content loss.
-        # occupancy_loss e content_loss vivono su scale diverse (BCE vs L1 su
-        # feature ad alta dimensionalita'), quindi lambda va tarato guardando
-        # i due termini separatamente nei log, non assunto = 1 a scatola chiusa.
-        self.lambda_occ = float(cfg.train.get("lambda_occ", 1.0))
-
-        # NOTA: mask_threshold non entra piu' nella loss (ne' content ne' occupancy,
-        # entrambe usano mask_tokens come segnale continuo/soft). Resta solo come
-        # soglia di discretizzazione per metriche interpretabili (IoU) in validazione.
-        self.mask_threshold = float(cfg.train.get("mask_threshold", 0.5))
+        self.criterion = nn.L1Loss()
 
         self.loader = self._build_dataloader(split="train")
 
@@ -128,6 +112,7 @@ class Engine:
         loader = DataLoader(
             dataset,
             batch_size=self.cfg.train.loader.batch_size,
+            shuffle=(split == "train"),
             num_workers=num_workers,
             pin_memory=True,
             persistent_workers=num_workers > 0,
@@ -277,60 +262,17 @@ class Engine:
         )
         return True
 
-    # --- loss: content (pesata, continua) + occupancy (BCE soft, esplicita) ---
-    #
-    # mask_tokens (B, N) e' una frazione continua in [0,1] (viene da un resize
-    # BOX sulla maschera binaria, quindi e' gia' un soft-label naturale). Non
-    # usiamo piu' una soglia per decidere "dentro/fuori" dalla loss:
-    # - il CONTENUTO pesa ogni token in proporzione alla sua copertura reale
-    #   (un bordo al 30% conta poco, uno al 95% conta quasi come pieno):
-    #   niente piu' cutoff binario che amplifica il rumore del segmentatore.
-    # - l'OCCUPANCY e' un head separato, allenato a rigenerare mask_tokens
-    #   stesso: e' il predittore che ora deve imparare "dove" va l'oggetto
-    #   sotto una data R, non piu' un'informazione che riceve gratis in input.
-
     @staticmethod
-    def _weighted_l1(pred: torch.Tensor, target: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
-        """L1 per-token pesata da weight (continuo, non binario). pred/target: (B, N, D), weight: (B, N)."""
-        per_token = F.l1_loss(pred, target, reduction="none").mean(dim=-1)  # (B, N)
-        denom = weight.sum().clamp(min=1e-6)
-        return (per_token * weight).sum() / denom
-
-    @staticmethod
-    def _weighted_cos(pred: torch.Tensor, target: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
-        """Cosine similarity media, pesata da weight (continuo)."""
-        per_token = F.cosine_similarity(pred, target, dim=-1)  # (B, N)
-        denom = weight.sum().clamp(min=1e-6)
-        return (per_token * weight).sum() / denom
-
-    @staticmethod
-    def _baseline_l1(target: torch.Tensor, weight: torch.Tensor) -> float:
-        """L1 del miglior predittore costante (mediana pesata approssimata con
-        soglia solo qui, per avere una baseline scalare semplice da confrontare)."""
-        valid = (weight > 0.5)
-        target_valid = target[valid] if valid.any() else target.reshape(-1, target.shape[-1])
-        median = target_valid.median(dim=0, keepdim=True).values
-        return F.l1_loss(median.expand_as(target_valid), target_valid).item()
-
-    def _compute_losses(self, pred_content, pred_occ_logits, target, mask_tokens):
-        """
-        pred_content: (B, N, D) - output del predictor, spazio DINOv2
-        pred_occ_logits: (B, N) - logit dell'occupancy head (pre-sigmoid)
-        target: (B, N, D) - DINOv2 frozen, MAI mascherato/alterato
-        mask_tokens: (B, N) - frazione continua di copertura oggetto, GT
-        """
-        content_loss = self._weighted_l1(pred_content, target, mask_tokens)
-
-        # soft-BCE: mask_tokens come probabilita' target, non come cutoff
-        occupancy_loss = F.binary_cross_entropy_with_logits(pred_occ_logits, mask_tokens)
-
-        total = content_loss + self.lambda_occ * occupancy_loss
-        return total, content_loss, occupancy_loss
+    def _baseline_l1(target: torch.Tensor) -> float:
+        """L1 del miglior predittore costante (mediana sui token), come baseline di riferimento."""
+        flat = target.reshape(-1, target.shape[-1])
+        median = flat.median(dim=0, keepdim=True).values
+        return F.l1_loss(median.expand_as(flat), flat).item()
 
     def train_epoch(self, epoch: int) -> dict:
         self._set_train_mode()
         self.loader.dataset._epoch_counter.value = epoch
-        running = {"loss": 0.0, "content_loss": 0.0, "occ_loss": 0.0, "cos": 0.0}
+        running = {"loss": 0.0, "cos": 0.0}
         n_batches = 0
         start_time = time.time()
         total_steps = self.steps_per_epoch
@@ -343,15 +285,12 @@ class Engine:
             batch = self._to_device(batch)
 
             self.optimizer.zero_grad(set_to_none=True)
-            pred_content, pred_occ_logits, target = self._forward(batch)
+            pred_content, target = self._forward(batch)
 
-            mask_tokens = batch["mask_tokens"]
-            loss, content_loss, occ_loss = self._compute_losses(
-                pred_content, pred_occ_logits, target, mask_tokens
-            )
+            loss = self.criterion(pred_content, target)
 
             with torch.no_grad():
-                cos = self._weighted_cos(pred_content, target, mask_tokens).item()
+                cos = F.cosine_similarity(pred_content, target, dim=-1).mean().item()
 
             loss.backward()
             self.optimizer.step()
@@ -359,23 +298,18 @@ class Engine:
             self.global_step += 1
 
             running["loss"] += loss.item()
-            running["content_loss"] += content_loss.item()
-            running["occ_loss"] += occ_loss.item()
             running["cos"] += cos
             n_batches += 1
 
             if step % self.log_every == 0:
                 lr = self.optimizer.param_groups[0]["lr"]
                 log.info(
-                    "epoch %d step %d/%d loss=%.4f content=%.4f occ=%.4f cos=%.4f lr=%.2e",
-                    epoch, step, total_steps, loss.item(), content_loss.item(),
-                    occ_loss.item(), cos, lr,
+                    "epoch %d step %d/%d loss=%.4f cos=%.4f lr=%.2e",
+                    epoch, step, total_steps, loss.item(), cos, lr,
                 )
                 if self.wandb_run is not None:
                     wandb.log({
                         "train/loss_step": loss.item(),
-                        "train/content_loss_step": content_loss.item(),
-                        "train/occ_loss_step": occ_loss.item(),
                         "train/cos_step": cos,
                         "train/lr": lr,
                     }, step=self.global_step)
@@ -385,8 +319,6 @@ class Engine:
         n = max(n_batches, 1)
         return {
             "loss": running["loss"] / n,
-            "content_loss": running["content_loss"] / n,
-            "occ_loss": running["occ_loss"] / n,
             "cos": running["cos"] / n,
             "time_s": round(elapsed, 1),
             "samples_per_s": round(seen / max(elapsed, 1e-6), 1),
@@ -403,7 +335,6 @@ class Engine:
         agg = {
             "loss": 0.0, "loss_perm": 0.0,
             "cos": 0.0, "cos_perm": 0.0,
-            "occ_iou": 0.0, "occ_iou_perm": 0.0,
             "baseline_l1": 0.0,
         }
         n_batches = 0
@@ -415,41 +346,27 @@ class Engine:
                 break
 
             batch = self._to_device(batch)
-            mask_tokens = batch["mask_tokens"]
 
-            pred_content, pred_occ_logits, target = self._forward(batch)
-            loss, _, _ = self._compute_losses(pred_content, pred_occ_logits, target, mask_tokens)
+            pred_content, target = self._forward(batch)
+            loss = self.criterion(pred_content, target)
             agg["loss"] += loss.item()
-            agg["cos"] += self._weighted_cos(pred_content, target, mask_tokens).item()
-            agg["baseline_l1"] += self._baseline_l1(target, mask_tokens)
+            agg["cos"] += F.cosine_similarity(pred_content, target, dim=-1).mean().item()
+            agg["baseline_l1"] += self._baseline_l1(target)
 
-            # IoU tra occupancy predetta (con R vera) e GT, entrambe discretizzate
-            # solo qui per avere una metrica interpretabile in [0,1].
-            occ_pred_bin = (torch.sigmoid(pred_occ_logits) > self.mask_threshold)
-            occ_gt_bin = (mask_tokens > self.mask_threshold)
-            inter = (occ_pred_bin & occ_gt_bin).float().sum(dim=1)
-            union = (occ_pred_bin | occ_gt_bin).float().sum(dim=1).clamp(min=1e-6)
-            agg["occ_iou"] += (inter / union).mean().item()
-
-            # --- controllo: rotazione permutata nel batch ---
+            # --- sanity check: rotazione permutata nel batch ---
+            # verifica che il predittore sia davvero sensibile a R e non stia
+            # ignorando la posa (es. facendo semplicemente una media del context).
             B = target.shape[0]
             perm = torch.randperm(B, device=target.device)
             if B > 1 and (perm == torch.arange(B, device=target.device)).all():
                 perm = perm.roll(1)
 
             R_mat = batch["rot_matrix"]
-            pred_content_perm, pred_occ_logits_perm, _ = self._forward(batch, override_R=R_mat[perm])
+            pred_content_perm, _ = self._forward(batch, override_R=R_mat[perm])
 
-            loss_perm, _, _ = self._compute_losses(
-                pred_content_perm, pred_occ_logits_perm, target, mask_tokens
-            )
+            loss_perm = self.criterion(pred_content_perm, target)
             agg["loss_perm"] += loss_perm.item()
-            agg["cos_perm"] += self._weighted_cos(pred_content_perm, target, mask_tokens).item()
-
-            occ_pred_perm_bin = (torch.sigmoid(pred_occ_logits_perm) > self.mask_threshold)
-            inter_p = (occ_pred_perm_bin & occ_gt_bin).float().sum(dim=1)
-            union_p = (occ_pred_perm_bin | occ_gt_bin).float().sum(dim=1).clamp(min=1e-6)
-            agg["occ_iou_perm"] += (inter_p / union_p).mean().item()
+            agg["cos_perm"] += F.cosine_similarity(pred_content_perm, target, dim=-1).mean().item()
 
             n_batches += 1
 
@@ -470,12 +387,6 @@ class Engine:
             "cos": cos_true,
             "cos_perm": cos_perm,
             "gap_cos": cos_true - cos_perm,
-            # nuova metrica: quanto l'occupancy predetta segue la vera R
-            # rispetto a una R sbagliata (permutata). Isola "sa dove va
-            # l'oggetto" da "sa cosa c'e' dentro" (gap_cos).
-            "occ_iou": agg["occ_iou"] / n,
-            "occ_iou_perm": agg["occ_iou_perm"] / n,
-            "gap_occ_iou": (agg["occ_iou"] - agg["occ_iou_perm"]) / n,
             "baseline_l1": baseline,
             "loss_ratio": loss_true / max(baseline, 1e-8),
             "time_s": round(elapsed, 1),
@@ -488,7 +399,10 @@ class Engine:
         }
 
     @staticmethod
-    def _generate_rays(K, R, trans, grid_size=16, patch_size=14):
+    def _generate_rays(K, R, trans, centroid, scale, grid_size=16, patch_size=14):
+        """
+        Plucker rays, normalized by centroid and scale of the 3D model.
+        """
         B = K.shape[0]
         device = K.device
 
@@ -508,9 +422,15 @@ class Engine:
         R_inv = R.transpose(1, 2)
         d_o = F.normalize(torch.bmm(d_c, R_inv.transpose(1, 2)), p=2, dim=-1)   # (B, N, 3)
 
-        O = -torch.bmm(R_inv, trans.unsqueeze(-1)).squeeze(-1)                 # (B, 3)
+        # trans_norm = (trans + R @ centroid) / scale
+        # (derivazione: O_norm = (O_world - centroid) / scale, con O_world = -R^T trans)
+        centroid_col = centroid.unsqueeze(-1)                                            # (B, 3, 1)
+        trans_norm = (trans.unsqueeze(-1) + torch.bmm(R, centroid_col)).squeeze(-1)      # (B, 3)
+        trans_norm = trans_norm / scale.unsqueeze(-1)                                    # (B, 3)
+
+        O = -torch.bmm(R_inv, trans_norm.unsqueeze(-1)).squeeze(-1)                      # (B, 3)
         O_exp = O.unsqueeze(1).expand(-1, d_o.shape[1], -1)
-        moment = torch.cross(O_exp, d_o, dim=-1)                               # (B, N, 3)
+        moment = torch.cross(O_exp, d_o, dim=-1)                                         # (B, N, 3)
 
         return d_o, moment
 
@@ -520,21 +440,25 @@ class Engine:
         trans = batch["trans"]
         context_features = batch["context_3d"]
         context_centers = batch["center_3d"]
+        centroid = batch["centroid"]
+        scale = batch["scale"]
 
         R_mat = override_R if override_R is not None else batch["rot_matrix"]
-        ray_dirs, ray_moments = self._generate_rays(K, R_mat, trans, grid_size=16, patch_size=14)
+        ray_dirs, ray_moments = self._generate_rays(
+            K, R_mat, trans, centroid, scale, grid_size=16, patch_size=14
+        )
 
         with torch.no_grad():
             target = self.models["encoder2d"](img)
 
-        pred_content, pred_occ_logits = self.models["predictor"](
+        pred_content = self.models["predictor"](
             ray_dirs=ray_dirs,
             ray_moments=ray_moments,
             context_features=context_features,
             context_centers=context_centers,
         )
 
-        return pred_content, pred_occ_logits, target
+        return pred_content, target
 
     def _set_train_mode(self):
         for name, m in self.models.items():
