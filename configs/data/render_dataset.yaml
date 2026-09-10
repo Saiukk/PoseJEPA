@@ -7,5 +7,5 @@ split_seed: 42
 grid_size: 16
 patch_size: 14
 image_size: 224
-views_per_epoch: 8
+views_per_epoch: 50
   

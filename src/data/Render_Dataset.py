@@ -5,10 +5,11 @@ import os
 import random
 
 import numpy as np
+import pyrender
 import torch
 from torch.utils.data import Dataset
 
-from .render_utils import render_random_view
+from .render_utils import build_pyrender_mesh, render_random_view
 
 log = logging.getLogger(__name__)
 
@@ -44,7 +45,7 @@ def compute_context(model_name, dataset_source, cache_context):
 
 
 def list_model_names(dataset_source: str) -> list[str]:
-    """Elenca gli oggetti disponibili nella root del dataset (una sotto-cartella per oggetto)."""
+    """List all model names in the dataset source, used to divide Train and Validation."""
     return sorted(
         d for d in os.listdir(dataset_source)
         if os.path.isdir(os.path.join(dataset_source, d))
@@ -95,6 +96,7 @@ class RenderDataset(Dataset):
         patch_size: int = 14,
         image_size: int = 224,
         views_per_epoch: int = 1,
+        preload_meshes: bool = True,
     ):
         assert split in ("train", "val"), f"split non valido: {split}"
 
@@ -122,6 +124,16 @@ class RenderDataset(Dataset):
         self._epoch_counter = multiprocessing.Value("i", 0)
         self._context_cache: dict[str, tuple] = {}
 
+        # Cache pyrender mesh to reduce the overhead of loading
+        self._mesh_cache: dict[str, pyrender.Mesh] = {}
+
+        if preload_meshes:
+            self.preload_meshes()
+
+        # Each worker will have its own renderer instance, created on demand only once and reused
+        self._renderer: pyrender.OffscreenRenderer | None = None
+        self._renderer_size: tuple[int, int] | None = None
+
         # normalizzazione DINOv2, precomputata come tensori (broadcast su C,H,W)
         self._dino_mean = torch.tensor(DINOV2_MEAN).view(3, 1, 1)
         self._dino_std = torch.tensor(DINOV2_STD).view(3, 1, 1)
@@ -132,6 +144,16 @@ class RenderDataset(Dataset):
             split, len(all_names), len(train_names), len(val_names),
             split_seed, self.views_per_epoch,
         )
+
+    def preload_meshes(self) -> None:
+        """
+        Preload all meshes into memory to reduce the overhead of loading during training.
+        """
+        log.info("[%s] Preload di %d mesh in corso...", self.split, len(self.model_names))
+        for name in self.model_names:
+            model_dir = os.path.join(self.dataset_source, name.replace("gso_", ""))
+            self._mesh_cache[name] = build_pyrender_mesh(model_dir)
+        log.info("[%s] Preload completato (%d mesh in cache).", self.split, len(self._mesh_cache))
 
     def __len__(self) -> int:
         return len(self.model_names) * self.views_per_epoch
@@ -146,23 +168,52 @@ class RenderDataset(Dataset):
             self._context_cache[model_name] = data
         return self._context_cache[model_name]
 
+    def _get_mesh(self, model_name: str) -> pyrender.Mesh:
+        mesh = self._mesh_cache.get(model_name)
+        if mesh is None:
+            model_dir = os.path.join(self.dataset_source, model_name.replace("gso_", ""))
+            mesh = build_pyrender_mesh(model_dir)
+            self._mesh_cache[model_name] = mesh
+        return mesh
+
+    def _get_renderer(self, width: int, height: int) -> pyrender.OffscreenRenderer:
+        """Return a persistent renderer instance for the current worker
+        """
+        if self._renderer is None:
+            self._renderer = pyrender.OffscreenRenderer(width, height)
+            self._renderer_size = (width, height)
+        elif self._renderer_size != (width, height):
+            self._renderer.viewport_width = width
+            self._renderer.viewport_height = height
+            self._renderer_size = (width, height)
+        return self._renderer
+
+    def __del__(self):
+        renderer = getattr(self, "_renderer", None)
+        if renderer is not None:
+            try:
+                renderer.delete()
+            except Exception:
+                pass
+
     def __getitem__(self, idx: int) -> dict:
         model_idx = idx % len(self.model_names)         # use module to restart model selection every views_per_epoch
         model_name = self.model_names[model_idx]
 
         context_3d, center_3d, centroid, scale = self._get_context(model_name)
+        render_mesh = self._get_mesh(model_name)
 
         epoch = self._epoch_counter.value
         seed = _stable_seed(model_name, epoch, idx) & 0xFFFFFFFF        # Per la riproducibilità
         rng = np.random.default_rng(seed)
 
         image, mask, K, R, t = render_random_view(
-            model_name=model_name,
-            dataset_source=self.dataset_source,
+            render_mesh=render_mesh,
             centroid=centroid,
             scale=scale,
             image_size=self.image_size,
             rng=rng,
+            get_renderer_fn=self._get_renderer,
         )
 
         # Dino setup
@@ -181,3 +232,29 @@ class RenderDataset(Dataset):
             "rot_matrix": torch.from_numpy(R).float(),
             "trans": torch.from_numpy(t).float(),
         }
+
+
+def make_dataloader(
+    dataset: RenderDataset,
+    batch_size: int,
+    num_workers: int = 8,
+    shuffle: bool = True,
+    prefetch_factor: int = 4,
+    pin_memory: bool = True,
+):
+    """Factory di comodo con le opzioni di prefetch/persistenza consigliate.
+
+    persistent_workers=True e' cruciale: senza, i worker vengono ri-forkati
+    ad ogni epoca e sia la mesh cache che il renderer persistente per
+    worker verrebbero ricreati da zero, vanificando gran parte del guadagno.
+    """
+    return torch.utils.data.DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=shuffle,
+        num_workers=num_workers,
+        persistent_workers=num_workers > 0,
+        prefetch_factor=prefetch_factor if num_workers > 0 else None,
+        pin_memory=pin_memory,
+        multiprocessing_context="fork" if num_workers > 0 else None,
+    )

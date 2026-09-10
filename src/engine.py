@@ -116,6 +116,8 @@ class Engine:
             num_workers=num_workers,
             pin_memory=True,
             persistent_workers=num_workers > 0,
+            prefetch_factor=4,                      #<-- Keep the GPU busy
+            multiprocessing_context="fork"
         )
         log.info("[%s] Dataloader: %d shard, %d worker", split, n_shards, num_workers)
         return loader

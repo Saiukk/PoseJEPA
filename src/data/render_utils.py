@@ -1,6 +1,5 @@
 import logging
 import os
-
 import numpy as np
 import pyrender
 import trimesh
@@ -9,22 +8,24 @@ from PIL import Image
 log = logging.getLogger(__name__)
 
 
-def load_gso_mesh(model_dir: str) -> trimesh.Trimesh:
-    """Load mesh and texture from a GSO model."""
+MAX_TEXTURE_SIZE = 512  
 
+def load_gso_mesh(model_dir: str) -> trimesh.Trimesh:
     obj_path = os.path.join(model_dir, "meshes", "model.obj")
     if not os.path.exists(obj_path):
         raise FileNotFoundError(f"OBJ non trovato: {obj_path}")
 
     loaded = trimesh.load(obj_path, process=False)
 
-    # If no texture is found, try to load.
     def fix_texture(mesh):
         vis = mesh.visual
         if hasattr(vis, "material") and getattr(vis.material, "image", None) is None:
             tex_path = os.path.join(model_dir, "materials", "textures", "texture.png")
             if os.path.exists(tex_path):
-                vis.material.image = Image.open(tex_path)
+                img = Image.open(tex_path).convert("RGB")  # niente alpha se non serve
+                if max(img.size) > MAX_TEXTURE_SIZE:
+                    img.thumbnail((MAX_TEXTURE_SIZE, MAX_TEXTURE_SIZE), Image.LANCZOS)
+                vis.material.image = img
             else:
                 log.warning(f"Texture non trovata per {model_dir}: {tex_path}")
         return mesh
@@ -36,6 +37,11 @@ def load_gso_mesh(model_dir: str) -> trimesh.Trimesh:
         mesh = fix_texture(loaded)
 
     return mesh
+
+# Used to reduce the overhead of creating a pyrender.Mesh from a trimesh.
+def build_pyrender_mesh(model_dir: str) -> pyrender.Mesh:
+    mesh = load_gso_mesh(model_dir)
+    return pyrender.Mesh.from_trimesh(mesh, smooth=False)
 
 
 def _sample_camera_pose(
@@ -99,8 +105,7 @@ def _sample_intrinsics(image_size: int, rng: np.random.Generator, fov_range=(25,
 
 
 def render_random_view(
-    model_name: str,
-    dataset_source: str,
+    render_mesh: pyrender.Mesh,
     centroid: np.ndarray,
     scale: float,
     image_size: int = 224,
@@ -109,6 +114,8 @@ def render_random_view(
     frac_range=(0.85, 0.9),
     shift_safety=0.9,
     light_intensity_range=(2.5, 3.5),
+    renderer: "pyrender.OffscreenRenderer | None" = None,
+    get_renderer_fn=None,
 ):
     """
     Render a view of a 3D model.
@@ -116,11 +123,6 @@ def render_random_view(
     if rng is None:
         rng = np.random.default_rng()
 
-    model_dir = os.path.join(dataset_source, model_name)
-    mesh = load_gso_mesh(model_dir)
-
-    # TODO: cache della mesh trimesh->pyrender 
-    render_mesh = pyrender.Mesh.from_trimesh(mesh, smooth=False)
     scene = pyrender.Scene(bg_color=[1.0, 1.0, 1.0, 0.0], ambient_light=[0.4, 0.4, 0.4])
     scene.add(render_mesh)
 
@@ -160,12 +162,24 @@ def render_random_view(
     light = pyrender.DirectionalLight(color=np.ones(3), intensity=light_intensity)
     scene.add(light, pose=cam_pose)
 
-    # Render the scene offscreen
-    renderer = pyrender.OffscreenRenderer(render_w, render_h)
+    # Render the scene using either a provided renderer or a temporary one
+    owns_renderer = False
+    if get_renderer_fn is not None:
+        active_renderer = get_renderer_fn(render_w, render_h)
+    elif renderer is not None:
+        if renderer.viewport_width != render_w or renderer.viewport_height != render_h:
+            renderer.viewport_width = render_w
+            renderer.viewport_height = render_h
+        active_renderer = renderer
+    else:
+        active_renderer = pyrender.OffscreenRenderer(render_w, render_h)
+        owns_renderer = True
+
     try:
-        color, depth = renderer.render(scene, flags=pyrender.RenderFlags.RGBA)
+        color, depth = active_renderer.render(scene, flags=pyrender.RenderFlags.RGBA)
     finally:
-        renderer.delete()
+        if owns_renderer:
+            active_renderer.delete()
 
     # Crop the image to the desired size, centering on the jittered principal point
     ox = int(round(render_w / 2.0 - cx))
