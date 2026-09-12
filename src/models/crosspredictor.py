@@ -201,7 +201,7 @@ class RayCrossAttnPredictor(nn.Module):
         self._init_weights()
 
         logging.info(
-            "RayCrossAttnPredictor initialized (depth=%d, FourierBands=%d, plucker=True)",
+            "RayCrossAttnPredictor initialized (depth=%d, PosFourierBands=%d, DirFourierBands=%d, plucker=True)",
             depth, pos_fourier_bands, dir_fourier_bands,
         )
 

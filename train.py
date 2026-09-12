@@ -4,7 +4,7 @@ from omegaconf import DictConfig
 from src.engine import Engine
 import os
 
-GPU = "1"
+GPU = "0"
 
 os.environ["EGL_DEVICE_ID"] = GPU  
 os.environ["CUDA_VISIBLE_DEVICES"] = GPU
