@@ -71,23 +71,20 @@ class Engine:
 
     # Build..
 
-    def _build_models(self) -> dict[str, nn.Module]:
+    def _build_models(self):
         encoder2d = hydra.utils.instantiate(self.cfg.encoder2d).to(self.device)
-        encoder3d = hydra.utils.instantiate(self.cfg.encoder3d).to(self.device)
         predictor = hydra.utils.instantiate(
             self.cfg.Predictor,
-            context_dim=encoder3d.output_dim[0][-1],
+            context_dim=encoder2d.output_dim[-1],   # ora DINOv2, non piu' UNI3D
             output_dim=encoder2d.output_dim[-1],
         ).to(self.device)
-        models = {"encoder2d": encoder2d, "encoder3d": encoder3d, "predictor": predictor}
-
+        models = {"encoder2d": encoder2d, "predictor": predictor}
         for name, module in models.items():
             is_trainable = name in self.trainable_components
             for p in module.parameters():
                 p.requires_grad_(is_trainable)
             module.train(is_trainable)
             log.info("Model '%s' -> trainable=%s", name, is_trainable)
-
         return models
 
     def _build_dataloader(self, split: str = "train"):
@@ -400,64 +397,27 @@ class Engine:
             for k, v in batch.items()
         }
 
-    @staticmethod
-    def _generate_rays(K, R, trans, centroid, scale, grid_size=16, patch_size=14):
-        """
-        Plucker rays, normalized by centroid and scale of the 3D model.
-        """
-        B = K.shape[0]
-        device = K.device
-
-        y = torch.arange(grid_size, device=device, dtype=torch.float32)
-        x = torch.arange(grid_size, device=device, dtype=torch.float32)
-        grid_y, grid_x = torch.meshgrid(y, x, indexing='ij')
-
-        u = grid_x * patch_size + (patch_size / 2.0)
-        v = grid_y * patch_size + (patch_size / 2.0)
-
-        uv1 = torch.stack([u, v, torch.ones_like(u)], dim=-1).reshape(-1, 3)
-        uv1 = uv1.unsqueeze(0).expand(B, -1, -1)
-
-        K_inv = torch.linalg.inv(K)
-        d_c = torch.bmm(uv1, K_inv.transpose(1, 2))
-
-        R_inv = R.transpose(1, 2)
-        d_o = F.normalize(torch.bmm(d_c, R_inv.transpose(1, 2)), p=2, dim=-1)   # (B, N, 3)
-
-        # trans_norm = (trans + R @ centroid) / scale
-        # (derivazione: O_norm = (O_world - centroid) / scale, con O_world = -R^T trans)
-        centroid_col = centroid.unsqueeze(-1)                                            # (B, 3, 1)
-        trans_norm = (trans.unsqueeze(-1) + torch.bmm(R, centroid_col)).squeeze(-1)      # (B, 3)
-        trans_norm = trans_norm / scale.unsqueeze(-1)                                    # (B, 3)
-
-        O = -torch.bmm(R_inv, trans_norm.unsqueeze(-1)).squeeze(-1)                      # (B, 3)
-        O_exp = O.unsqueeze(1).expand(-1, d_o.shape[1], -1)
-        moment = torch.cross(O_exp, d_o, dim=-1)                                         # (B, N, 3)
-
-        return d_o, moment
-
+    
     def _forward(self, batch, override_R=None):
         img = batch["image"]
-        K = batch["K"]
-        trans = batch["trans"]
-        context_features = batch["context_3d"]
-        context_centers = batch["center_3d"]
+        R_query = override_R if override_R is not None else batch["rot_matrix"]
+        t_query = batch["trans"]
         centroid = batch["centroid"]
         scale = batch["scale"]
 
-        R_mat = override_R if override_R is not None else batch["rot_matrix"]
-        ray_dirs, ray_moments = self._generate_rays(
-            K, R_mat, trans, centroid, scale, grid_size=16, patch_size=14
-        )
+        
+        context_dino = batch["context_3d"]                 # (B, N, P, D)
+        context_pose = batch["center_3d"]                  # (B, N, 12)
+        context_R = context_pose[..., :9].reshape(*context_pose.shape[:-1], 3, 3)
+        context_t = context_pose[..., 9:]
 
         with torch.no_grad():
-            target = self.models["encoder2d"](img)
+            target = self.models["encoder2d"](img)          # (B, 256, D)
 
         pred_content = self.models["predictor"](
-            ray_dirs=ray_dirs,
-            ray_moments=ray_moments,
-            context_features=context_features,
-            context_centers=context_centers,
+            R_query=R_query, t_query=t_query,
+            context_dino=context_dino, context_R=context_R, context_t=context_t,
+            centroid=centroid, scale=scale,
         )
 
         return pred_content, target

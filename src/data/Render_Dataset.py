@@ -3,6 +3,7 @@ import logging
 import multiprocessing
 import os
 import random
+from collections import OrderedDict
 
 import numpy as np
 import pyrender
@@ -28,7 +29,7 @@ def compute_context(model_name, dataset_source, cache_context):
     """
     model_name = model_name.replace("gso_", "")
     if cache_context:
-        context_path = f"{dataset_source}/{model_name}/embedding.npz"
+        context_path = f"{dataset_source}/{model_name}/embeddingDINO.npz"
         try:
             context_data = np.load(context_path)
             context_3d = context_data["features"]
@@ -97,6 +98,7 @@ class RenderDataset(Dataset):
         image_size: int = 224,
         views_per_epoch: int = 1,
         preload_meshes: bool = True,
+        context_cache_maxsize: int = 60,
     ):
         assert split in ("train", "val"), f"split non valido: {split}"
 
@@ -122,7 +124,8 @@ class RenderDataset(Dataset):
 
         self.shard_paths = self.model_names
         self._epoch_counter = multiprocessing.Value("i", 0)
-        self._context_cache: dict[str, tuple] = {}
+        self._context_cache_maxsize = max(1, context_cache_maxsize)
+        self._context_cache: "OrderedDict[str, tuple]" = OrderedDict()
 
         # Cache pyrender mesh to reduce the overhead of loading
         self._mesh_cache: dict[str, pyrender.Mesh] = {}
@@ -140,9 +143,9 @@ class RenderDataset(Dataset):
 
         log.info(
             "[%s] RenderDataset: %d oggetti totali -> train=%d val=%d (seed=%d), "
-            "views_per_epoch=%d",
+            "views_per_epoch=%d, context_cache_maxsize=%d",
             split, len(all_names), len(train_names), len(val_names),
-            split_seed, self.views_per_epoch,
+            split_seed, self.views_per_epoch, self._context_cache_maxsize,
         )
 
     def preload_meshes(self) -> None:
@@ -159,14 +162,22 @@ class RenderDataset(Dataset):
         return len(self.model_names) * self.views_per_epoch
 
     def _get_context(self, model_name: str):
-        if model_name not in self._context_cache:
-            data = compute_context(model_name, self.dataset_source, self.cache_context)
-            if data is None:
-                raise FileNotFoundError(
-                    f"Context 3D mancante per '{model_name}': esegui prima cacheEmb3d.py"
-                )
-            self._context_cache[model_name] = data
-        return self._context_cache[model_name]
+
+        if model_name in self._context_cache:
+            self._context_cache.move_to_end(model_name)
+            return self._context_cache[model_name]
+
+        data = compute_context(model_name, self.dataset_source, self.cache_context)
+        if data is None:
+            raise FileNotFoundError(
+                f"Context 3D mancante per '{model_name}': esegui prima cacheEmb3d.py"
+            )
+
+        self._context_cache[model_name] = data
+        if len(self._context_cache) > self._context_cache_maxsize:
+            self._context_cache.popitem(last=False)  # evict il meno recente
+
+        return data
 
     def _get_mesh(self, model_name: str) -> pyrender.Mesh:
         mesh = self._mesh_cache.get(model_name)

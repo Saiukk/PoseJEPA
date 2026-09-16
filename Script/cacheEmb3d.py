@@ -13,10 +13,6 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 log = logging.getLogger(__name__)
 
 
-''' REMEMBER TO LAUNCHE THE SCRIPT with :
-PYTHONPATH=/home/riccardop02/JEPA HYDRA_FULL_ERROR=1 /home/riccardop02/miniconda3/envs/poseJepa/bin/python /home/riccardop02/JEPA/Script/cacheEmb3d.py encoder3d._target_=src.models.encoder3d.Uni3D.Uni3DEncoder '''
-
-
 def load_gso_mesh(model_dir: str) -> trimesh.Trimesh:
     """ Load meshes and texture from a GSO model """
 
