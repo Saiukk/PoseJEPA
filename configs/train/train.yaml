@@ -1,11 +1,11 @@
 loader:
   batch_size: 64            #32
-  num_workers: 8
+  num_workers: 4
 
 trainer:
   lr: 1e-4                                # 3e-4
   weight_decay: 0.05                    # 0.05
-  epochs: 250                        # 500
+  epochs: 250                       # 500
   steps_per_epoch: 700                  # 1200
   val_steps: 150
   warmup_frac: 0.03

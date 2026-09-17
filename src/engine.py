@@ -12,7 +12,7 @@ import torch.nn.functional as F
 import wandb
 from hydra.core.hydra_config import HydraConfig
 from omegaconf import DictConfig, OmegaConf
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, IterableDataset
 
 log = logging.getLogger(__name__)
 
@@ -87,10 +87,14 @@ class Engine:
             log.info("Model '%s' -> trainable=%s", name, is_trainable)
         return models
 
-    def _build_dataloader(self, split: str = "train"):
+    def _build_dataloader(self, split: str = "train", epoch: int | None = None):
         dataset = hydra.utils.instantiate(
             self.cfg.data, dataset_source=self.cfg.gso.root, split=split
         )
+
+        is_streaming = isinstance(dataset, IterableDataset)
+        if is_streaming and hasattr(dataset, "set_epoch"):
+            dataset.set_epoch(epoch if epoch is not None else 0)
 
         n_shards = len(getattr(dataset, "shard_paths", []))
         if n_shards == 0:
@@ -109,14 +113,18 @@ class Engine:
         loader = DataLoader(
             dataset,
             batch_size=self.cfg.train.loader.batch_size,
-            shuffle=(split == "train"),
+            shuffle=False,
             num_workers=num_workers,
             pin_memory=True,
-            persistent_workers=num_workers > 0,
-            prefetch_factor=4,                      #<-- Keep the GPU busy
-            multiprocessing_context="fork"
+            persistent_workers=(num_workers > 0) and not is_streaming,
+            prefetch_factor=4 if num_workers > 0 else None,  #<-- Keep the GPU busy
+            multiprocessing_context="fork" if num_workers > 0 else None,
         )
-        log.info("[%s] Dataloader: %d shard, %d worker", split, n_shards, num_workers)
+        log.info(
+            "[%s] Dataloader: %d shard, %d worker%s",
+            split, n_shards, num_workers,
+            " (streaming)" if is_streaming else "",
+        )
         return loader
 
     def _setup_training(self):
@@ -270,7 +278,21 @@ class Engine:
 
     def train_epoch(self, epoch: int) -> dict:
         self._set_train_mode()
-        self.loader.dataset._epoch_counter.value = epoch
+
+        # RenderDataset (map-style): basta aggiornare il contatore condiviso
+        # tra i worker gia' forkati, nessun bisogno di ricreare il loader.
+        # RenderDatasetStreaming (iterable): ogni epoca vive in shard diversi
+        # sul Hub, quindi il dataset/loader va ricreato da zero.
+        if hasattr(self.loader.dataset, "_epoch_counter"):
+            self.loader.dataset._epoch_counter.value = epoch
+        elif hasattr(self.loader.dataset, "set_epoch"):
+            self.loader = self._build_dataloader(split="train", epoch=epoch)
+        else:
+            raise AttributeError(
+                f"Dataset {type(self.loader.dataset)} non supporta ne' "
+                f"_epoch_counter ne' set_epoch: aggiungi il supporto per l'epoca."
+            )
+
         running = {"loss": 0.0, "cos": 0.0}
         n_batches = 0
         start_time = time.time()
@@ -313,6 +335,14 @@ class Engine:
                         "train/lr": lr,
                     }, step=self.global_step)
 
+        if n_batches < self.steps_per_epoch:
+            log.warning(
+                "epoch %d: solo %d/%d batch disponibili (il dataset e' finito prima). "
+                "Se streaming: controlla che ci siano abbastanza sample pre-renderizzati "
+                "per questa epoca su HF, o riduci steps_per_epoch.",
+                epoch, n_batches, self.steps_per_epoch,
+            )
+
         elapsed = time.time() - start_time
         seen = n_batches * self.cfg.train.loader.batch_size
         n = max(n_batches, 1)
@@ -327,6 +357,11 @@ class Engine:
     def val_epoch(self, epoch: int) -> dict:
         if self.val_loader is None:
             return {}
+
+        if hasattr(self.val_loader.dataset, "_epoch_counter"):
+            self.val_loader.dataset._epoch_counter.value = epoch
+        elif hasattr(self.val_loader.dataset, "set_epoch"):
+            self.val_loader = self._build_dataloader(split="val", epoch=epoch)
 
         for m in self.models.values():
             m.eval()
@@ -413,6 +448,7 @@ class Engine:
 
         with torch.no_grad():
             target = self.models["encoder2d"](img)          # (B, 256, D)
+    
 
         pred_content = self.models["predictor"](
             R_query=R_query, t_query=t_query,

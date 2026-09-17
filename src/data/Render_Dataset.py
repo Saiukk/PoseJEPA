@@ -17,6 +17,9 @@ log = logging.getLogger(__name__)
 DINOV2_MEAN = (0.485, 0.456, 0.406)
 DINOV2_STD = (0.229, 0.224, 0.225)
 
+NPY_SUBDIR = "embeddingDINO"  # output di convert_npz_to_npy.py
+LEGACY_NPZ_FILENAME = "embeddingDINO.npz"
+
 
 def _stable_seed(*parts: object) -> int:
     s = "_".join(str(p) for p in parts)
@@ -24,23 +27,44 @@ def _stable_seed(*parts: object) -> int:
 
 
 def compute_context(model_name, dataset_source, cache_context):
-    """
-    Compute the 3D context for a given model name.
-    """
+
     model_name = model_name.replace("gso_", "")
-    if cache_context:
-        context_path = f"{dataset_source}/{model_name}/embeddingDINO.npz"
-        try:
-            context_data = np.load(context_path)
-            context_3d = context_data["features"]
-            center_3d = context_data["centers"]
-            centroid = context_data["centroid"]
-            scale = context_data["scale"]
-        except FileNotFoundError:
-            logging.warning(f"Cached context for {model_name} not found at {context_path}.")
-            return None
-    else:
+    if not cache_context:
         raise NotImplementedError("3D context computation is not implemented yet.")
+
+    model_dir = os.path.join(dataset_source, model_name)
+    npy_dir = os.path.join(model_dir, NPY_SUBDIR)
+    marker = os.path.join(npy_dir, ".done")
+
+    if os.path.isfile(marker):
+        try:
+            # mmap_mode="r": mappa il file, non lo carica subito in RAM.
+            # La copia reale avviene solo quando i dati vengono
+            # consumati (es. torch.from_numpy(...).float() in
+            # __getitem__), che e' esattamente il punto in cui li
+            # vogliamo "vivi" per il training.
+            context_3d = np.load(os.path.join(npy_dir, "features.npy"))             #, mmap_mode="r"
+            center_3d = np.load(os.path.join(npy_dir, "centers.npy"))             #, mmap_mode="r"
+            centroid = np.load(os.path.join(npy_dir, "centroid.npy"))             #, mmap_mode="r"
+            scale = np.load(os.path.join(npy_dir, "scale.npy"))             #, mmap_mode="r"
+            return context_3d, center_3d, centroid, scale
+        except FileNotFoundError:
+            logging.warning(
+                f"Marker .done trovato ma file .npy mancanti per {model_name} in {npy_dir}, "
+                f"fallback su .npz."
+            )
+
+    # Fallback: vecchio percorso .npz, non ancora convertito.
+    context_path = os.path.join(model_dir, LEGACY_NPZ_FILENAME)
+    try:
+        with np.load(context_path) as context_data:
+            context_3d = np.array(context_data["features"])
+            center_3d = np.array(context_data["centers"])
+            centroid = np.array(context_data["centroid"])
+            scale = np.array(context_data["scale"])
+    except FileNotFoundError:
+        logging.warning(f"Cached context for {model_name} not found at {context_path}.")
+        return None
 
     return context_3d, center_3d, centroid, scale
 
@@ -98,8 +122,9 @@ class RenderDataset(Dataset):
         image_size: int = 224,
         views_per_epoch: int = 1,
         preload_meshes: bool = True,
-        context_cache_maxsize: int = 60,
+        context_cache_maxsize: int = 0,
     ):
+
         assert split in ("train", "val"), f"split non valido: {split}"
 
         self.dataset_source = dataset_source
@@ -124,7 +149,8 @@ class RenderDataset(Dataset):
 
         self.shard_paths = self.model_names
         self._epoch_counter = multiprocessing.Value("i", 0)
-        self._context_cache_maxsize = max(1, context_cache_maxsize)
+
+        self._context_cache_maxsize = max(0, context_cache_maxsize)
         self._context_cache: "OrderedDict[str, tuple]" = OrderedDict()
 
         # Cache pyrender mesh to reduce the overhead of loading
@@ -143,7 +169,7 @@ class RenderDataset(Dataset):
 
         log.info(
             "[%s] RenderDataset: %d oggetti totali -> train=%d val=%d (seed=%d), "
-            "views_per_epoch=%d, context_cache_maxsize=%d",
+            "views_per_epoch=%d, context_cache_maxsize=%d (context via mmap .npy)",
             split, len(all_names), len(train_names), len(val_names),
             split_seed, self.views_per_epoch, self._context_cache_maxsize,
         )
@@ -162,6 +188,14 @@ class RenderDataset(Dataset):
         return len(self.model_names) * self.views_per_epoch
 
     def _get_context(self, model_name: str):
+        if self._context_cache_maxsize == 0:
+            data = compute_context(model_name, self.dataset_source, self.cache_context)
+            if data is None:
+                raise FileNotFoundError(
+                    f"Context 3D mancante per '{model_name}': esegui prima cacheEmb3d.py "
+                    f"e/o convert_npz_to_npy.py"
+                )
+            return data
 
         if model_name in self._context_cache:
             self._context_cache.move_to_end(model_name)
@@ -170,7 +204,8 @@ class RenderDataset(Dataset):
         data = compute_context(model_name, self.dataset_source, self.cache_context)
         if data is None:
             raise FileNotFoundError(
-                f"Context 3D mancante per '{model_name}': esegui prima cacheEmb3d.py"
+                f"Context 3D mancante per '{model_name}': esegui prima cacheEmb3d.py "
+                f"e/o convert_npz_to_npy.py"
             )
 
         self._context_cache[model_name] = data
@@ -231,18 +266,22 @@ class RenderDataset(Dataset):
         image_t = torch.from_numpy(image).float()
         image_t = (image_t - self._dino_mean) / self._dino_std
 
-        return {
+        out = {
             "model_name": model_name,
             "image": image_t,                                   # (3, H, W)
-            "mask": torch.from_numpy(mask).float(),             # (H, W) 
-            "context_3d": torch.from_numpy(context_3d).float(),
-            "center_3d": torch.from_numpy(center_3d).float(),
-            "centroid": torch.from_numpy(centroid).float(),
+            "mask": torch.from_numpy(mask).float(),             # (H, W)
+            # torch.from_numpy(...).float() copia i dati in RAM qui:
+            # e' il punto in cui l'array mmap-backed viene "materializzato".
+            "context_3d": torch.from_numpy(np.array(context_3d)).float(),
+            "center_3d": torch.from_numpy(np.array(center_3d)).float(),
+            "centroid": torch.from_numpy(np.array(centroid)).float(),
             "scale": torch.tensor(float(scale)),
             "K": torch.from_numpy(K).float(),
             "rot_matrix": torch.from_numpy(R).float(),
             "trans": torch.from_numpy(t).float(),
         }
+
+        return out
 
 
 def make_dataloader(
@@ -250,7 +289,7 @@ def make_dataloader(
     batch_size: int,
     num_workers: int = 8,
     shuffle: bool = True,
-    prefetch_factor: int = 4,
+    prefetch_factor: int = 2,
     pin_memory: bool = True,
 ):
     """Factory di comodo con le opzioni di prefetch/persistenza consigliate.
