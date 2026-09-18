@@ -9,6 +9,7 @@ import io
 import glob
 import logging
 import random
+import os
 from braceexpand import braceexpand
 from scipy.spatial.transform import Rotation as R
 
@@ -28,32 +29,51 @@ def _inv_rigid(T):
     Ti[:3, 3] = -T[:3, :3].T @ T[:3, 3]
     return Ti
 
+
+NPY_SUBDIR = "embeddingDINO"  # output di convert_npz_to_npy.py
+LEGACY_NPZ_FILENAME = "embeddingDINO.npz"
+
 def compute_context(model_name, dataset_source, cache_context):
-    """
-    Compute the 3D context for a given model name.
-    Ritorna None se l'embedding non c'e' -> l'oggetto viene skippato.
-    """
 
-    model_name = model_name.replace("gso_", "") 
-    if cache_context:
-        # Load the 3D context from a precomputed cache
-        context_path = f"{dataset_source}/{model_name}/embedding.npz"
-        try:
-            context_data = np.load(context_path)
-
-            context_3d = context_data["features"]
-            center_3d = context_data["centers"]
-            #logging.info(f"Loaded cached context for {model_name} from {context_path}")
-        except FileNotFoundError:
-            logging.warning(f"Cached context for {model_name} not found at {context_path}.")
-            return None  
-
-            
-    # Compute !TODO
-    else:
+    model_name = model_name.replace("gso_", "")
+    if not cache_context:
         raise NotImplementedError("3D context computation is not implemented yet.")
 
-    return context_3d, center_3d
+    model_dir = os.path.join(dataset_source, model_name)
+    npy_dir = os.path.join(model_dir, NPY_SUBDIR)
+    marker = os.path.join(npy_dir, ".done")
+
+    if os.path.isfile(marker):
+        try:
+            # mmap_mode="r": mappa il file, non lo carica subito in RAM.
+            # La copia reale avviene solo quando i dati vengono
+            # consumati (es. torch.from_numpy(...).float() in
+            # __getitem__), che e' esattamente il punto in cui li
+            # vogliamo "vivi" per il training.
+            context_3d = np.load(os.path.join(npy_dir, "features.npy"))             #, mmap_mode="r"
+            center_3d = np.load(os.path.join(npy_dir, "centers.npy"))             #, mmap_mode="r"
+            centroid = np.load(os.path.join(npy_dir, "centroid.npy"))             #, mmap_mode="r"
+            scale = np.load(os.path.join(npy_dir, "scale.npy"))             #, mmap_mode="r"
+            return context_3d, center_3d, centroid, scale
+        except FileNotFoundError:
+            logging.warning(
+                f"Marker .done trovato ma file .npy mancanti per {model_name} in {npy_dir}, "
+                f"fallback su .npz."
+            )
+
+    # Fallback: vecchio percorso .npz, non ancora convertito.
+    context_path = os.path.join(model_dir, LEGACY_NPZ_FILENAME)
+    try:
+        with np.load(context_path) as context_data:
+            context_3d = np.array(context_data["features"])
+            center_3d = np.array(context_data["centers"])
+            centroid = np.array(context_data["centroid"])
+            scale = np.array(context_data["scale"])
+    except FileNotFoundError:
+        logging.warning(f"Cached context for {model_name} not found at {context_path}.")
+        return None
+
+    return context_3d, center_3d, centroid, scale
 
 class GSOMegaposeDataset(IterableDataset):
     def __init__(
@@ -66,7 +86,7 @@ class GSOMegaposeDataset(IterableDataset):
         patch_size: int = 14,
         mean: tuple = (0.485, 0.456, 0.406),
         std: tuple = (0.229, 0.224, 0.225),
-        cache_context: bool = True,
+        cache_context: bool = False,
         val_shards: int = 0,
         split: str = "train",
         split_seed: int = 42,
@@ -222,7 +242,7 @@ class GSOMegaposeDataset(IterableDataset):
 
 
                 # Passing the 3d context to the predictor
-                context_3d, center_3d = compute_context(obj["label"], self.dataset_source, self.cache_context)  
+                context_3d, center_3d, centroid, scale = compute_context(obj["label"], self.dataset_source, self.cache_context)  
 
                 yield {
                     "image": img_t,
@@ -235,6 +255,8 @@ class GSOMegaposeDataset(IterableDataset):
                     "model_name": obj["label"],
                     "context_3d": context_3d,
                     "center_3d": center_3d,
+                    "centroid": centroid,
+                    "scale": scale,
                     "visib_fract": float(obj["visib_fract"]),
                     "scene_key": scene_key,
                 }

@@ -117,7 +117,7 @@ class Engine:
             num_workers=num_workers,
             pin_memory=True,
             persistent_workers=(num_workers > 0) and not is_streaming,
-            prefetch_factor=4 if num_workers > 0 else None,  #<-- Keep the GPU busy
+            prefetch_factor=2 if num_workers > 0 else None,  #<-- Keep the GPU busy
             multiprocessing_context="fork" if num_workers > 0 else None,
         )
         log.info(
@@ -191,6 +191,9 @@ class Engine:
                 log.info("best_val_loss restored from best.pt: %.4f", self.best_val_loss)
             else:
                 self.best_val_loss = ckpt.get("val_loss", float("inf")) or float("inf")
+
+        self.scaler = torch.amp.GradScaler()
+
 
     def _setup_wandb(self):
         wandb_cfg = self.cfg.get("wandb", None)
@@ -279,10 +282,6 @@ class Engine:
     def train_epoch(self, epoch: int) -> dict:
         self._set_train_mode()
 
-        # RenderDataset (map-style): basta aggiornare il contatore condiviso
-        # tra i worker gia' forkati, nessun bisogno di ricreare il loader.
-        # RenderDatasetStreaming (iterable): ogni epoca vive in shard diversi
-        # sul Hub, quindi il dataset/loader va ricreato da zero.
         if hasattr(self.loader.dataset, "_epoch_counter"):
             self.loader.dataset._epoch_counter.value = epoch
         elif hasattr(self.loader.dataset, "set_epoch"):
@@ -293,7 +292,8 @@ class Engine:
                 f"_epoch_counter ne' set_epoch: aggiungi il supporto per l'epoca."
             )
 
-        running = {"loss": 0.0, "cos": 0.0}
+        running_loss = torch.tensor(0.0, device=self.device)
+        running_cos = torch.tensor(0.0, device=self.device)
         n_batches = 0
         start_time = time.time()
         total_steps = self.steps_per_epoch
@@ -304,34 +304,40 @@ class Engine:
                 break
 
             batch = self._to_device(batch)
-
             self.optimizer.zero_grad(set_to_none=True)
-            pred_content, target = self._forward(batch)
 
-            loss = self.criterion(pred_content, target)
+            with torch.autocast(device_type="cuda", dtype=torch.float16):
+                pred_content, target = self._forward(batch)
+                loss = self.criterion(pred_content, target)
+                # Calcola il coseno SENZA chiamare .item() per non bloccare la GPU
+                cos = F.cosine_similarity(pred_content, target, dim=-1).mean()
 
-            with torch.no_grad():
-                cos = F.cosine_similarity(pred_content, target, dim=-1).mean().item()
-
-            loss.backward()
-            self.optimizer.step()
+            
+            self.scaler.scale(loss).backward()
+            self.scaler.step(self.optimizer)
+            self.scaler.update()
+            
             self.scheduler.step()
             self.global_step += 1
 
-            running["loss"] += loss.item()
-            running["cos"] += cos
+
+            running_loss += loss.detach()
+            running_cos += cos.detach()
             n_batches += 1
 
+
             if step % self.log_every == 0:
+                loss_val = loss.item()
+                cos_val = cos.item()
                 lr = self.optimizer.param_groups[0]["lr"]
                 log.info(
                     "epoch %d step %d/%d loss=%.4f cos=%.4f lr=%.2e",
-                    epoch, step, total_steps, loss.item(), cos, lr,
+                    epoch, step, total_steps, loss_val, cos_val, lr,
                 )
                 if self.wandb_run is not None:
                     wandb.log({
-                        "train/loss_step": loss.item(),
-                        "train/cos_step": cos,
+                        "train/loss_step": loss_val,
+                        "train/cos_step": cos_val,
                         "train/lr": lr,
                     }, step=self.global_step)
 
@@ -347,8 +353,8 @@ class Engine:
         seen = n_batches * self.cfg.train.loader.batch_size
         n = max(n_batches, 1)
         return {
-            "loss": running["loss"] / n,
-            "cos": running["cos"] / n,
+            "loss": (running_loss / n).item(),
+            "cos": (running_cos / n).item(),
             "time_s": round(elapsed, 1),
             "samples_per_s": round(seen / max(elapsed, 1e-6), 1),
         }
@@ -381,26 +387,31 @@ class Engine:
 
             batch = self._to_device(batch)
 
-            pred_content, target = self._forward(batch)
-            loss = self.criterion(pred_content, target)
+            with torch.autocast(device_type="cuda", dtype=torch.float16):
+                pred_content, target = self._forward(batch)
+                loss = self.criterion(pred_content, target)
+                cos = F.cosine_similarity(pred_content, target, dim=-1).mean()
+
             agg["loss"] += loss.item()
-            agg["cos"] += F.cosine_similarity(pred_content, target, dim=-1).mean().item()
+            agg["cos"] += cos.item()
             agg["baseline_l1"] += self._baseline_l1(target)
 
             # --- sanity check: rotazione permutata nel batch ---
-            # verifica che il predittore sia davvero sensibile a R e non stia
-            # ignorando la posa (es. facendo semplicemente una media del context).
+
             B = target.shape[0]
             perm = torch.randperm(B, device=target.device)
             if B > 1 and (perm == torch.arange(B, device=target.device)).all():
                 perm = perm.roll(1)
 
             R_mat = batch["rot_matrix"]
-            pred_content_perm, _ = self._forward(batch, override_R=R_mat[perm])
 
-            loss_perm = self.criterion(pred_content_perm, target)
+            with torch.autocast(device_type="cuda", dtype=torch.float16):
+                pred_content_perm, _ = self._forward(batch, override_R=R_mat[perm])
+                loss_perm = self.criterion(pred_content_perm, target)
+                cos_perm = F.cosine_similarity(pred_content_perm, target, dim=-1).mean()
+
             agg["loss_perm"] += loss_perm.item()
-            agg["cos_perm"] += F.cosine_similarity(pred_content_perm, target, dim=-1).mean().item()
+            agg["cos_perm"] += cos_perm.item()
 
             n_batches += 1
 

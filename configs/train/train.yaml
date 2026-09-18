@@ -1,5 +1,5 @@
 loader:
-  batch_size: 64            #32
+  batch_size: 64            #64
   num_workers: 4
 
 trainer:
@@ -15,7 +15,7 @@ trainer:
   val_every: 1
   early_stop_patience: 0
   early_stop_min_delta: 0.0
-  resume: null #/experiments/riccardop02/outputs/2026-09-11/06-45-09/checkpoints/best<78.pt #null  # PATH TO CHECHPOINT 
+  resume: /experiments/riccardop02/outputs/2026-09-18/12-55-08/checkpoints/best.pt #null  # PATH TO CHECHPOINT 
 
 
 trainable_components: [predictor]
