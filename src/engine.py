@@ -12,7 +12,7 @@ import torch.nn.functional as F
 import wandb
 from hydra.core.hydra_config import HydraConfig
 from omegaconf import DictConfig, OmegaConf
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, IterableDataset
 
 log = logging.getLogger(__name__)
 
@@ -32,6 +32,10 @@ class Engine:
         self.is_train = is_train
         self.device = torch.device(cfg.get("device", "cuda:0"))
 
+        self.context_mode = cfg.data.get("context_mode", "uni3d")
+        if self.context_mode not in ("uni3d", "aggregator"):
+            raise ValueError(f"context_mode deve essere 'uni3d' o 'aggregator', ricevuto: {self.context_mode}")
+
         self.trainable_components = list(cfg.train.get("trainable_components", ["predictor"]))
 
         self.models = self._build_models()
@@ -42,6 +46,9 @@ class Engine:
 
         self.optimizer = None
         self.scheduler = None
+        self.scaler = None
+        self.grad_clip = None
+        self._trainable_params: list[nn.Parameter] = []
         self.epochs = None
         self.steps_per_epoch = None
         self.val_steps = None
@@ -73,13 +80,26 @@ class Engine:
 
     def _build_models(self) -> dict[str, nn.Module]:
         encoder2d = hydra.utils.instantiate(self.cfg.encoder2d).to(self.device)
-        encoder3d = hydra.utils.instantiate(self.cfg.encoder3d).to(self.device)
+
+        # L'Aggregator riceve le feature DINOv2 per vista: in_dim = dimensione di encoder2d
+        extra = {"in_dim": encoder2d.output_dim[-1]} if self.context_mode == "aggregator" else {}
+        encoder3d = hydra.utils.instantiate(self.cfg.encoder3d, **extra).to(self.device)
+
         predictor = hydra.utils.instantiate(
             self.cfg.Predictor,
             context_dim=encoder3d.output_dim[0][-1],
             output_dim=encoder2d.output_dim[-1],
         ).to(self.device)
         models = {"encoder2d": encoder2d, "encoder3d": encoder3d, "predictor": predictor}
+
+        if self.context_mode == "aggregator" and "encoder3d" not in self.trainable_components:
+            log.warning(
+                "context_mode=aggregator ma 'encoder3d' non e' in trainable_components: "
+                "l'Aggregator resta a pesi random!"
+            )
+        if self.context_mode == "uni3d" and "encoder3d" in self.trainable_components:
+            log.warning("context_mode=uni3d: 'encoder3d' resta frozen (rimosso da trainable_components)")
+            self.trainable_components.remove("encoder3d")
 
         for name, module in models.items():
             is_trainable = name in self.trainable_components
@@ -90,10 +110,14 @@ class Engine:
 
         return models
 
-    def _build_dataloader(self, split: str = "train"):
+    def _build_dataloader(self, split: str = "train", epoch: int | None = None):
         dataset = hydra.utils.instantiate(
             self.cfg.data, dataset_source=self.cfg.gso.root, split=split
         )
+
+        is_streaming = isinstance(dataset, IterableDataset)
+        if is_streaming and hasattr(dataset, "set_epoch"):
+            dataset.set_epoch(epoch if epoch is not None else 0)
 
         n_shards = len(getattr(dataset, "shard_paths", []))
         if n_shards == 0:
@@ -112,14 +136,18 @@ class Engine:
         loader = DataLoader(
             dataset,
             batch_size=self.cfg.train.loader.batch_size,
-            shuffle=(split == "train"),
+            shuffle=False,
             num_workers=num_workers,
             pin_memory=True,
-            persistent_workers=num_workers > 0,
-            prefetch_factor=4,                      #<-- Keep the GPU busy
-            multiprocessing_context="fork"
+            persistent_workers=(num_workers > 0) and not is_streaming,
+            prefetch_factor=2 if num_workers > 0 else None,  #<-- Keep the GPU busy
+            multiprocessing_context="fork" if num_workers > 0 else None,
         )
-        log.info("[%s] Dataloader: %d shard, %d worker", split, n_shards, num_workers)
+        log.info(
+            "[%s] Dataloader: %d shard, %d worker%s",
+            split, n_shards, num_workers,
+            " (streaming)" if is_streaming else "",
+        )
         return loader
 
     def _setup_training(self):
@@ -130,6 +158,7 @@ class Engine:
             params += list(self.models[name].parameters())
         if not params:
             raise ValueError("No trainable parameters: check trainable_components")
+        self._trainable_params = params
 
         self.optimizer = torch.optim.AdamW(
             params,
@@ -143,6 +172,7 @@ class Engine:
         self.log_every = trainer_cfg.get("log_every", 20)
         self.ckpt_every = trainer_cfg.get("ckpt_every", 5)
         self.val_every = trainer_cfg.get("val_every", 1)
+        self.grad_clip = trainer_cfg.get("grad_clip", None)     # es. 1.0; None = nessun clipping
 
         self.early_stop_patience = trainer_cfg.get("early_stop_patience", None)
         self.early_stop_min_delta = float(trainer_cfg.get("early_stop_min_delta", 0.0))
@@ -186,6 +216,8 @@ class Engine:
                 log.info("best_val_loss restored from best.pt: %.4f", self.best_val_loss)
             else:
                 self.best_val_loss = ckpt.get("val_loss", float("inf")) or float("inf")
+
+        self.scaler = torch.amp.GradScaler()
 
     def _setup_wandb(self):
         wandb_cfg = self.cfg.get("wandb", None)
@@ -271,10 +303,29 @@ class Engine:
         median = flat.median(dim=0, keepdim=True).values
         return F.l1_loss(median.expand_as(flat), flat).item()
 
+    def _grad_norms(self) -> dict[str, float]:
+        """Norma del gradiente per componente trainabile (da chiamare dopo unscale_)."""
+        out = {}
+        for name in self.trainable_components:
+            gs = [p.grad.detach().float().norm() for p in self.models[name].parameters() if p.grad is not None]
+            out[name] = torch.stack(gs).norm().item() if gs else 0.0
+        return out
+
     def train_epoch(self, epoch: int) -> dict:
         self._set_train_mode()
-        self.loader.dataset._epoch_counter.value = epoch
-        running = {"loss": 0.0, "cos": 0.0}
+
+        if hasattr(self.loader.dataset, "_epoch_counter"):
+            self.loader.dataset._epoch_counter.value = epoch
+        elif hasattr(self.loader.dataset, "set_epoch"):
+            self.loader = self._build_dataloader(split="train", epoch=epoch)
+        else:
+            raise AttributeError(
+                f"Dataset {type(self.loader.dataset)} non supporta ne' "
+                f"_epoch_counter ne' set_epoch: aggiungi il supporto per l'epoca."
+            )
+
+        running_loss = torch.tensor(0.0, device=self.device)
+        running_cos = torch.tensor(0.0, device=self.device)
         n_batches = 0
         start_time = time.time()
         total_steps = self.steps_per_epoch
@@ -285,43 +336,72 @@ class Engine:
                 break
 
             batch = self._to_device(batch)
-
             self.optimizer.zero_grad(set_to_none=True)
-            pred_content, target = self._forward(batch)
 
-            loss = self.criterion(pred_content, target)
+            # FORWARD: Aggregator (se attivo) -> raggi -> predictor, tutto nel grafo autograd
+            with torch.autocast(device_type="cuda", dtype=torch.float16):
+                pred_content, target = self._forward(batch)
+                loss = self.criterion(pred_content, target)
+                # Calcola il coseno SENZA chiamare .item() per non bloccare la GPU
+                cos = F.cosine_similarity(pred_content, target, dim=-1).mean()
 
-            with torch.no_grad():
-                cos = F.cosine_similarity(pred_content, target, dim=-1).mean().item()
+            # BACKWARD: loss -> predictor -> Aggregator (encoder3d) grazie a requires_grad
+            # su entrambi. Il target (encoder2d) e' sotto no_grad e non riceve nulla.
+            self.scaler.scale(loss).backward()
 
-            loss.backward()
-            self.optimizer.step()
+            is_log_step = step % self.log_every == 0
+            grad_norms: dict[str, float] = {}
+            if self.grad_clip or is_log_step:
+                self.scaler.unscale_(self.optimizer)          # gradienti in scala reale
+                if self.grad_clip:
+                    torch.nn.utils.clip_grad_norm_(self._trainable_params, self.grad_clip)
+                if is_log_step:
+                    grad_norms = self._grad_norms()
+
+            self.scaler.step(self.optimizer)
+            self.scaler.update()
+
             self.scheduler.step()
             self.global_step += 1
 
-            running["loss"] += loss.item()
-            running["cos"] += cos
+            running_loss += loss.detach()
+            running_cos += cos.detach()
             n_batches += 1
 
-            if step % self.log_every == 0:
+            if is_log_step:
+                loss_val = loss.item()
+                cos_val = cos.item()
                 lr = self.optimizer.param_groups[0]["lr"]
                 log.info(
-                    "epoch %d step %d/%d loss=%.4f cos=%.4f lr=%.2e",
-                    epoch, step, total_steps, loss.item(), cos, lr,
+                    "epoch %d step %d/%d loss=%.4f cos=%.4f lr=%.2e grad=%s",
+                    epoch, step, total_steps, loss_val, cos_val, lr,
+                    {k: round(v, 4) for k, v in grad_norms.items()},
                 )
+                if self.context_mode == "aggregator" and grad_norms.get("encoder3d", 1.0) == 0.0:
+                    log.warning("Gradiente dell'Aggregator = 0: non e' collegato al grafo (controlla il forward).")
                 if self.wandb_run is not None:
-                    wandb.log({
-                        "train/loss_step": loss.item(),
-                        "train/cos_step": cos,
+                    payload = {
+                        "train/loss_step": loss_val,
+                        "train/cos_step": cos_val,
                         "train/lr": lr,
-                    }, step=self.global_step)
+                    }
+                    payload.update({f"grad/{k}": v for k, v in grad_norms.items()})
+                    wandb.log(payload, step=self.global_step)
+
+        if n_batches < self.steps_per_epoch:
+            log.warning(
+                "epoch %d: solo %d/%d batch disponibili (il dataset e' finito prima). "
+                "Se streaming: controlla che ci siano abbastanza sample pre-renderizzati "
+                "per questa epoca su HF, o riduci steps_per_epoch.",
+                epoch, n_batches, self.steps_per_epoch,
+            )
 
         elapsed = time.time() - start_time
         seen = n_batches * self.cfg.train.loader.batch_size
         n = max(n_batches, 1)
         return {
-            "loss": running["loss"] / n,
-            "cos": running["cos"] / n,
+            "loss": (running_loss / n).item(),
+            "cos": (running_cos / n).item(),
             "time_s": round(elapsed, 1),
             "samples_per_s": round(seen / max(elapsed, 1e-6), 1),
         }
@@ -330,6 +410,11 @@ class Engine:
     def val_epoch(self, epoch: int) -> dict:
         if self.val_loader is None:
             return {}
+
+        if hasattr(self.val_loader.dataset, "_epoch_counter"):
+            self.val_loader.dataset._epoch_counter.value = epoch
+        elif hasattr(self.val_loader.dataset, "set_epoch"):
+            self.val_loader = self._build_dataloader(split="val", epoch=epoch)
 
         for m in self.models.values():
             m.eval()
@@ -349,26 +434,32 @@ class Engine:
 
             batch = self._to_device(batch)
 
-            pred_content, target = self._forward(batch)
-            loss = self.criterion(pred_content, target)
+            with torch.autocast(device_type="cuda", dtype=torch.float16):
+                ctx = self._encode_context(batch)              # una volta sola, riusato per il test permutato
+                pred_content, target = self._forward(batch, ctx=ctx)
+                loss = self.criterion(pred_content, target)
+                cos = F.cosine_similarity(pred_content, target, dim=-1).mean()
+
             agg["loss"] += loss.item()
-            agg["cos"] += F.cosine_similarity(pred_content, target, dim=-1).mean().item()
+            agg["cos"] += cos.item()
             agg["baseline_l1"] += self._baseline_l1(target)
 
             # --- sanity check: rotazione permutata nel batch ---
-            # verifica che il predittore sia davvero sensibile a R e non stia
-            # ignorando la posa (es. facendo semplicemente una media del context).
+
             B = target.shape[0]
             perm = torch.randperm(B, device=target.device)
             if B > 1 and (perm == torch.arange(B, device=target.device)).all():
                 perm = perm.roll(1)
 
             R_mat = batch["rot_matrix"]
-            pred_content_perm, _ = self._forward(batch, override_R=R_mat[perm])
 
-            loss_perm = self.criterion(pred_content_perm, target)
+            with torch.autocast(device_type="cuda", dtype=torch.float16):
+                pred_content_perm, _ = self._forward(batch, override_R=R_mat[perm], ctx=ctx)
+                loss_perm = self.criterion(pred_content_perm, target)
+                cos_perm = F.cosine_similarity(pred_content_perm, target, dim=-1).mean()
+
             agg["loss_perm"] += loss_perm.item()
-            agg["cos_perm"] += F.cosine_similarity(pred_content_perm, target, dim=-1).mean().item()
+            agg["cos_perm"] += cos_perm.item()
 
             n_batches += 1
 
@@ -436,19 +527,39 @@ class Engine:
 
         return d_o, moment
 
-    def _forward(self, batch, override_R=None):
-        img = batch["image"]
-        K = batch["K"]
-        trans = batch["trans"]
-        context_features = batch["context_3d"]
-        context_centers = batch["center_3d"]
-        centroid = batch["centroid"]
-        scale = batch["scale"]
+    def _encode_context(self, batch):
+        """Contesto 3D per il predictor: (B, P, D) feature + (B, P, 3) centri.
 
-        R_mat = override_R if override_R is not None else batch["rot_matrix"]
-        ray_dirs, ray_moments = self._generate_rays(
-            K, R_mat, trans, centroid, scale, grid_size=16, patch_size=14
-        )
+        - uni3d:      gia' calcolato dal dataset, nessun parametro trainabile.
+        - aggregator: cross-attention sulle viste (encoder3d), CON gradiente.
+        """
+        if self.context_mode == "aggregator":
+            return self.models["encoder3d"].extractFeatures(
+                batch["view_feats"].float(),     # (B, P, N, D)
+                batch["view_dirs"].float(),      # (B, P, N, 3)
+                batch["view_mask"],              # (B, P, N) bool
+                batch["point_xyz"].float(),      # (B, P, 3)
+            )
+        return batch["context_3d"], batch["center_3d"]
+
+    def _forward(self, batch, override_R=None, ctx=None):
+        img = batch["image"]
+        B = img.shape[0]
+        K = batch["K"].float()
+        trans = batch["trans"].float()
+        # il dataset salva centroid come (1,3) -> per campione serve (3,)
+        centroid = batch["centroid"].reshape(B, 3).float()
+        scale = batch["scale"].reshape(B).float()
+        R_mat = (override_R if override_R is not None else batch["rot_matrix"]).float()
+
+        # Raggi in fp32: sotto autocast bmm girerebbe in fp16 e la posa perderebbe precisione
+        with torch.autocast(device_type="cuda", enabled=False):
+            ray_dirs, ray_moments = self._generate_rays(
+                K, R_mat, trans, centroid, scale, grid_size=16, patch_size=14
+            )
+
+        # Aggregator (o contesto cached). NON dentro no_grad: serve il gradiente
+        context_features, context_centers = ctx if ctx is not None else self._encode_context(batch)
 
         with torch.no_grad():
             target = self.models["encoder2d"](img)
