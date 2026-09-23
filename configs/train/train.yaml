@@ -1,5 +1,5 @@
 loader:
-  batch_size: 64            #32
+  batch_size: 32            #32
   num_workers: 4
 
 trainer:
@@ -15,7 +15,7 @@ trainer:
   val_every: 1
   early_stop_patience: 0
   early_stop_min_delta: 0.0
-  resume: /experiments/riccardop02/outputs/2026-09-21/12-53-08/checkpoints/best.pt  # PATH TO CHECHPOINT 
+  resume: /experiments/riccardop02/outputs/2026-09-22/13-41-52/checkpoints/best.pt  # PATH TO CHECHPOINT 
 
 
 trainable_components: [predictor,encoder3d]

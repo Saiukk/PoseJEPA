@@ -126,29 +126,52 @@ class Engine:
                 return None
             raise ValueError(f"No shard found for split='{split}'")
 
-        num_workers = min(self.cfg.train.loader.num_workers, n_shards)
-        if num_workers != self.cfg.train.loader.num_workers:
+        loader_cfg = self.cfg.train.loader
+        requested_workers = loader_cfg.num_workers
+        if split == "val":
+            # opzionale: meno worker per la validation (ogni loader persistente tiene i suoi processi vivi)
+            requested_workers = loader_cfg.get("val_num_workers", requested_workers)
+
+        num_workers = min(requested_workers, n_shards)
+        if num_workers != requested_workers:
             log.warning(
-                f"num_workers={self.cfg.train.loader.num_workers} reduced to {num_workers} "
+                f"num_workers={requested_workers} reduced to {num_workers} "
                 f"because only {n_shards} shards available for split='{split}'"
             )
 
         loader = DataLoader(
             dataset,
-            batch_size=self.cfg.train.loader.batch_size,
+            batch_size=loader_cfg.batch_size,
             shuffle=False,
             num_workers=num_workers,
             pin_memory=True,
-            persistent_workers=(num_workers > 0) and not is_streaming,
-            prefetch_factor=2 if num_workers > 0 else None,  #<-- Keep the GPU busy
+            # Worker persistenti anche per lo streaming: l'epoca e' un mp.Value condiviso,
+            # quindi set_epoch() nel padre e' visibile ai worker gia' avviati.
+            persistent_workers=(num_workers > 0),
+            prefetch_factor=loader_cfg.get("prefetch_factor", 1) if num_workers > 0 else None,  #<-- Keep the GPU busy
             multiprocessing_context="fork" if num_workers > 0 else None,
         )
         log.info(
-            "[%s] Dataloader: %d shard, %d worker%s",
+            "[%s] Dataloader: %d shard, %d worker%s%s",
             split, n_shards, num_workers,
+            " (persistent)" if num_workers > 0 else "",
             " (streaming)" if is_streaming else "",
         )
         return loader
+
+    @staticmethod
+    def _set_dataset_epoch(loader, epoch: int, split: str) -> None:
+        """Aggiorna l'epoca del dataset SENZA ricostruire il DataLoader (worker persistenti)."""
+        ds = loader.dataset
+        if hasattr(ds, "_epoch_counter"):
+            ds._epoch_counter.value = epoch
+        elif hasattr(ds, "set_epoch"):
+            ds.set_epoch(epoch)
+        else:
+            raise AttributeError(
+                f"Dataset {type(ds)} ({split}) non supporta ne' "
+                f"_epoch_counter ne' set_epoch: aggiungi il supporto per l'epoca."
+            )
 
     def _setup_training(self):
         trainer_cfg = self.cfg.train.get("trainer", {})
@@ -314,15 +337,8 @@ class Engine:
     def train_epoch(self, epoch: int) -> dict:
         self._set_train_mode()
 
-        if hasattr(self.loader.dataset, "_epoch_counter"):
-            self.loader.dataset._epoch_counter.value = epoch
-        elif hasattr(self.loader.dataset, "set_epoch"):
-            self.loader = self._build_dataloader(split="train", epoch=epoch)
-        else:
-            raise AttributeError(
-                f"Dataset {type(self.loader.dataset)} non supporta ne' "
-                f"_epoch_counter ne' set_epoch: aggiungi il supporto per l'epoca."
-            )
+        # Aggiorna l'epoca sul dataset: niente ricostruzione del loader, i worker restano vivi
+        self._set_dataset_epoch(self.loader, epoch, "train")
 
         running_loss = torch.tensor(0.0, device=self.device)
         running_cos = torch.tensor(0.0, device=self.device)
@@ -411,10 +427,7 @@ class Engine:
         if self.val_loader is None:
             return {}
 
-        if hasattr(self.val_loader.dataset, "_epoch_counter"):
-            self.val_loader.dataset._epoch_counter.value = epoch
-        elif hasattr(self.val_loader.dataset, "set_epoch"):
-            self.val_loader = self._build_dataloader(split="val", epoch=epoch)
+        self._set_dataset_epoch(self.val_loader, epoch, "val")
 
         for m in self.models.values():
             m.eval()
@@ -532,12 +545,14 @@ class Engine:
 
         - uni3d:      gia' calcolato dal dataset, nessun parametro trainabile.
         - aggregator: cross-attention sulle viste (encoder3d), CON gradiente.
+                      I tensori arrivano dal dataset al dtype su disco: il cast
+                      avviene qui, sulla GPU.
         """
         if self.context_mode == "aggregator":
             return self.models["encoder3d"].extractFeatures(
                 batch["view_feats"].float(),     # (B, P, N, D)
                 batch["view_dirs"].float(),      # (B, P, N, 3)
-                batch["view_mask"],              # (B, P, N) bool
+                batch["view_mask"].bool(),       # (B, P, N) bool
                 batch["point_xyz"].float(),      # (B, P, 3)
             )
         return batch["context_3d"], batch["center_3d"]

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import multiprocessing as mp
 import os
 import sys
 import time
@@ -30,35 +31,55 @@ log = logging.getLogger(__name__)
 DINOV2_MEAN = (0.485, 0.456, 0.406)
 DINOV2_STD = (0.229, 0.224, 0.225)
 
-_AGGREGATOR_CONTEXT_CACHE: dict[str, tuple] = {}
+# Cache per processo (ogni worker ha la sua). Contiene tensori che puntano a
+# memoria mmap (copy-on-write): non occupa RAM "privata", le pagine stanno nel
+# page cache del kernel, condiviso tra i worker ed evictabile.
+_AGG_CACHE: dict[str, dict] = {}
 
 
-def compute_aggregator_context(
+def get_aggregator_context(
     model_name: str,
     dataset_source: str,
-    cache_context: bool = False,
+    cache_context: bool = True,
     dirname: str = "3DEmbedd",
-):
-    if cache_context and model_name in _AGGREGATOR_CONTEXT_CACHE:
-        return _AGGREGATOR_CONTEXT_CACHE[model_name]
+) -> dict:
+    """
+    Ritorna i tensori del contesto aggregator per un modello, SENZA cast.
+    I dtype restano quelli su disco: il cast (.float()/.bool()) si fa sulla GPU.
+    """
+    if cache_context:
+        ctx = _AGG_CACHE.get(model_name)
+        if ctx is not None:
+            return ctx
 
     base = os.path.join(dataset_source, model_name, dirname)
-    points = np.load(os.path.join(base, "points.npy"), mmap_mode="r")
-    view_feats = np.load(os.path.join(base, "view_feats.npy"), mmap_mode="r")
-    view_dirs = np.load(os.path.join(base, "view_dirs.npy"), mmap_mode="r")
-    mask = np.load(os.path.join(base, "mask.npy"), mmap_mode="r")
-    centroid = np.load(os.path.join(base, "centroid.npy"))
-    scale = float(np.load(os.path.join(base, "scale.npy")))
 
-    result = (points, view_feats, view_dirs, mask, centroid, scale)
+    def _mm(name: str):
+        # mmap_mode="c": copy-on-write -> array scrivibile (niente warning in
+        # torch.from_numpy), ma le pagine restano condivise finche' non scrivi.
+        return torch.from_numpy(np.load(os.path.join(base, name), mmap_mode="c"))
+
+    ctx = {
+        "point_xyz": _mm("points.npy"),
+        "view_feats": _mm("view_feats.npy"),
+        "view_dirs": _mm("view_dirs.npy"),
+        "view_mask": _mm("mask.npy"),
+        "centroid": torch.from_numpy(np.load(os.path.join(base, "centroid.npy"))).float(),
+        "scale": torch.tensor(float(np.load(os.path.join(base, "scale.npy")))),
+    }
+
     if cache_context:
-        _AGGREGATOR_CONTEXT_CACHE[model_name] = result
-    return result
+        _AGG_CACHE[model_name] = ctx
+    return ctx
 
 
 class RenderDatasetStreaming(IterableDataset):
     """
-    Scarica shard .tar da HF 
+    Scarica shard .tar da HF.
+
+    Pensato per DataLoader con persistent_workers=True e multiprocessing_context="fork":
+    l'epoca e' un mp.Value creato nel padre PRIMA del fork, quindi set_epoch()
+    chiamato nel padre e' visibile anche ai worker gia' avviati.
     """
 
     def __init__(
@@ -67,13 +88,13 @@ class RenderDatasetStreaming(IterableDataset):
         dataset_source: str,
         split: str = "train",
         context_mode: str = "uni3d",          # "uni3d" | "aggregator"
-        cache_context: bool = True,
+        cache_context: bool = False,
         val_ratio: float = 0.1,
         split_seed: int = 42,
         shuffle_buffer_size: int = None,
         token: str | None = None,
         local_cache_dir: str = "/tmp/shard_cache",
-        prefetch_depth: int = 6,  # Impostato a 1 per evitare OOM quando si usano molti worker
+        prefetch_depth: int = 6,  # Abbassalo (es. 1-2) se hai OOM/tmpfs pieno con molti worker
         log_transfer_stats: bool = True,
     ):
         if context_mode not in ("uni3d", "aggregator"):
@@ -86,14 +107,16 @@ class RenderDatasetStreaming(IterableDataset):
         self.cache_context = cache_context
         self.shuffle_buffer_size = int(shuffle_buffer_size) if shuffle_buffer_size else None
         self.token = token or os.getenv("HF_TOKENPRO") or os.getenv("HF_TOKEN")
-        self.epoch = 0
+
+        # Epoca condivisa tra padre e worker (deve esistere prima del fork).
+        self._epoch = mp.Value("i", 0)
+
         self.local_cache_dir = local_cache_dir
         self.prefetch_depth = max(1, int(prefetch_depth))
         self.log_transfer_stats = log_transfer_stats
 
-        # Cache della lista shard per epoca: {epoch: [remote_path, ...]}.
-        # Popolata nel processo padre da set_epoch() PRIMA che il DataLoader
-        # forki i worker.
+        # Cache lista shard per epoca. Ogni worker la popola lazy (fallback in
+        # _list_remote_shards): la copia del padre non e' visibile ai worker persistenti.
         self._shard_cache: dict[int, list[str]] = {}
 
         if not self.token:
@@ -116,14 +139,22 @@ class RenderDatasetStreaming(IterableDataset):
         self._dino_std = torch.tensor(DINOV2_STD).view(3, 1, 1)
 
         log.info(
-            "[%s] RenderDatasetStreaming(wds, prefetch_depth=%d, context_mode=%s): repo=%s, %d modelli attesi, epoch=%d",
-            split, self.prefetch_depth, self.context_mode, repo_id, len(self.model_names), self.epoch,
+            "[%s] RenderDatasetStreaming(wds, prefetch_depth=%d, context_mode=%s, cache_context=%s): "
+            "repo=%s, %d modelli attesi, epoch=%d",
+            split, self.prefetch_depth, self.context_mode, self.cache_context,
+            repo_id, len(self.model_names), self.epoch,
         )
 
+    # ---------- epoca ----------
+
+    @property
+    def epoch(self) -> int:
+        return self._epoch.value
+
     def set_epoch(self, epoch: int) -> None:
-        self.epoch = epoch
-        if epoch not in self._shard_cache:
-            self._shard_cache[epoch] = self._fetch_remote_shards(epoch)
+        # Solo il valore condiviso. Nessun fetch nel padre: i worker fanno il
+        # loro list_repo_files lazy (1 chiamata per worker per epoca).
+        self._epoch.value = int(epoch)
 
     def _epoch_prefix(self, epoch: int) -> str:
         return f"data/{self.split}/epoch_{epoch:03d}/"
@@ -140,10 +171,6 @@ class RenderDatasetStreaming(IterableDataset):
 
     def _list_remote_shards(self, epoch: int) -> list[str]:
         if epoch not in self._shard_cache:
-            log.debug(
-                "[%s] cache shard mancante per epoch=%d, fetch diretto (fallback)",
-                self.split, epoch,
-            )
             self._shard_cache[epoch] = self._fetch_remote_shards(epoch)
         return self._shard_cache[epoch]
 
@@ -195,8 +222,18 @@ class RenderDatasetStreaming(IterableDataset):
             print(f"[download-end] worker={wid} {remote_path} dt={dt:.2f}s", flush=True)
         return local_path
 
-   
-    # SKip error
+    @staticmethod
+    def _remove_shard_files(local_path: str) -> None:
+        """Rimuove lo shard scaricato e il relativo .metadata di hf_hub."""
+        metadata_path = local_path.replace("/data/", "/.cache/huggingface/download/data/") + ".metadata"
+        for p in (local_path, metadata_path):
+            try:
+                if os.path.exists(p):
+                    os.remove(p)
+            except OSError:
+                pass
+
+    # Skip error
     def _log_and_skip(self, exn: Exception) -> bool:
         wid = self._worker_id()
         log.warning(
@@ -253,44 +290,40 @@ class RenderDatasetStreaming(IterableDataset):
             out["scale"] = torch.tensor(float(scale))
 
         else:  # "aggregator"
-            points, view_feats, view_dirs, vis_mask, centroid, scale = compute_aggregator_context(
-                model_name, self.dataset_source, self.cache_context
+            # Nessun cast qui: view_feats/view_dirs/point_xyz/view_mask restano al
+            # dtype su disco; il cast a float/bool avviene sulla GPU (engine).
+            out.update(
+                get_aggregator_context(model_name, self.dataset_source, self.cache_context)
             )
-            out["point_xyz"] = torch.from_numpy(points).float()
-            out["view_feats"] = torch.from_numpy(view_feats).float()
-            out["view_dirs"] = torch.from_numpy(view_dirs).float()
-            out["view_mask"] = torch.from_numpy(vis_mask).bool()
-            out["centroid"] = torch.from_numpy(np.asarray(centroid)).float()
-            out["scale"] = torch.tensor(float(scale))
 
         return out
 
-    # Iteration 
+    # Iteration
     def __iter__(self):
-        # Check shard and assign to workers
-        remote_shards = self._list_remote_shards(self.epoch)
+        epoch = self.epoch  # letto ad ogni iter(): con worker persistenti viene richiamato ogni epoca
+
+        remote_shards = self._list_remote_shards(epoch)
         if not remote_shards:
             log.warning(
                 "[%s] epoch=%d: nessuno shard .tar trovato (prefix %s). Iteratore vuoto.",
-                self.split, self.epoch, self._epoch_prefix(self.epoch),
+                self.split, epoch, self._epoch_prefix(epoch),
             )
             return iter(())
 
-        # for each worker, take only the shards assigned 
+        # for each worker, take only the shards assigned
         info = torch.utils.data.get_worker_info()
         wid = self._worker_id()
         if info is not None:
             total_before = len(remote_shards)
             remote_shards = remote_shards[info.id::info.num_workers]
             log.info(
-                "[%s][worker %d/%d] shard totali=%d assegnati=%d -> %s",
-                self.split, info.id, info.num_workers, total_before, len(remote_shards), remote_shards,
+                "[%s][worker %d/%d] epoch=%d shard totali=%d assegnati=%d -> %s",
+                self.split, info.id, info.num_workers, epoch, total_before, len(remote_shards), remote_shards,
             )
 
         if not remote_shards:
             return iter(())
 
-        # USED TO using workers to prefetch shards in parallel
         cache_dir = self._worker_cache_dir()
         depth = min(self.prefetch_depth, len(remote_shards))
         executor = ThreadPoolExecutor(max_workers=depth)
@@ -298,9 +331,15 @@ class RenderDatasetStreaming(IterableDataset):
         def _fetch(path):
             return self._download_shard(path, cache_dir)
 
+        def _cleanup_future(fut):
+            # Chiamata per i download ancora in coda quando il generatore viene chiuso
+            # (es. l'engine interrompe l'epoca a steps_per_epoch): evita shard orfani su disco.
+            if fut.cancelled() or fut.exception() is not None:
+                return
+            self._remove_shard_files(fut.result())
+
         # Generator that yields samples from shards, downloading them in parallel
         def _generator():
-            # create the queue of futures shards to download
             futures = deque(
                 executor.submit(_fetch, p) for p in remote_shards[:depth]
             )
@@ -332,10 +371,9 @@ class RenderDatasetStreaming(IterableDataset):
                         futures.append(executor.submit(_fetch, remote_shards[next_idx]))
                         next_idx += 1
 
-                    # Connection with the WebDataset pipeline
                     pipeline = wds.WebDataset(
-                        local_path, 
-                        handler=self._log_and_skip, 
+                        local_path,
+                        handler=self._log_and_skip,
                         empty_check=False,
                         shardshuffle=False,
                         nodesplitter=lambda src: src,   # FONDAMENTALE per i multi-worker
@@ -358,20 +396,11 @@ class RenderDatasetStreaming(IterableDataset):
                                 "controlla i WARNING 'errore ignorato' sopra per la causa.",
                                 self.split, wid, remote_path,
                             )
-                        if os.path.exists(local_path):
-                            try:
-                                os.remove(local_path)
-                            except OSError:
-                                pass
-
-                        metadata_path = local_path.replace("/data/", "/.cache/huggingface/download/data/") + ".metadata"
-
-                        if os.path.exists(metadata_path):
-                            try:
-                                os.remove(metadata_path)
-                            except OSError:
-                                pass
+                        self._remove_shard_files(local_path)
             finally:
+                for fut in futures:
+                    if not fut.cancel():
+                        fut.add_done_callback(_cleanup_future)
                 executor.shutdown(wait=False)
 
         return _generator()
