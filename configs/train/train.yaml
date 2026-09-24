@@ -15,7 +15,7 @@ trainer:
   val_every: 1
   early_stop_patience: 0
   early_stop_min_delta: 0.0
-  resume: /experiments/riccardop02/outputs/2026-09-22/13-41-52/checkpoints/best.pt  # PATH TO CHECHPOINT 
+  resume: /experiments/riccardop02/outputs/2026-09-23/09-12-37/checkpoints/best.pt  # PATH TO CHECHPOINT 
 
 
 trainable_components: [predictor,encoder3d]

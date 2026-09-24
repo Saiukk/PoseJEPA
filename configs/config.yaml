@@ -2,7 +2,7 @@ defaults:
   - encoder2d: dinov2
   - encoder3d: aggregator
   - Predictor: predictor
-  - data: stream_dataset
+  - data: dataset
   - train: train
   - wandb: wandb
   - _self_
