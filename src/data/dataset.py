@@ -395,7 +395,7 @@ class GSOMegaposeDataset(IterableDataset):
 
                     TCO = TCW @ _pose_to_mat(obj["TWO"])
                     rot_matrix = TCO[:3, :3].astype(np.float32)
-                    trans = TCO[:3, 3].astype(np.float32)
+                    trans = TCO[:3, 3].astype(np.float32) * 1000.0          # convertito in mm per coerenza con il context aggregator
                     quat = R.from_matrix(rot_matrix).as_quat().astype(np.float32)
 
                     xmin, ymin, xmax, ymax = box

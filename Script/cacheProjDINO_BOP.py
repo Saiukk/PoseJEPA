@@ -1,6 +1,7 @@
 import os
-os.environ.setdefault("PYOPENGL_PLATFORM", "egl")  
+os.environ.setdefault("PYOPENGL_PLATFORM", "egl")
 import sys
+import glob
 import logging
 import numpy as np
 import torch
@@ -8,7 +9,10 @@ import torch.nn.functional as F
 import trimesh
 import pyrender
 import hydra
+from PIL import Image
 from omegaconf import DictConfig
+from trimesh.visual import TextureVisuals
+from trimesh.visual.material import PBRMaterial
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, "/home/riccardop02/JEPA/")
@@ -17,32 +21,85 @@ from src.models.encoder3d.uni3d_backbone import fps  # ritorna già i punti, non
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger(__name__)
 
+GSO_CANDIDATES = ("meshes/model.obj", "model.obj", "meshes/model.glb", "model.glb")
 
-def load_gso_mesh_bop(model_dir: str) -> trimesh.Trimesh:
-    """
-    Carica una mesh GSO in formato BOP-renderer (models_bop-renderer_scale=0.1).
-    Struttura attesa: {model_dir}/meshes/model.ply
+# soglie oltre le quali l'allineamento viene segnalato come sospetto
+ALIGN_REL_STD_TOL = 1e-3   # le 3 scale per asse devono coincidere (scala uniforme)
+ALIGN_MAX_DEV_TOL = 1e-2   # scarto residuo dei bounds, relativo all'estensione massima
 
-    Sostituisce load_gso_mesh: qui usiamo sempre e solo il .ply, perché è la
-    stessa mesh con cui sono state renderizzate le immagini di riferimento
-    (target render, pose annotate) usate nel resto della pipeline. Centroid e
-    scale calcolati su questa mesh restano quindi coerenti con qualunque altro
-    punto della pipeline (es. render_gso_object) che carichi lo stesso .ply.
+
+def _find_texture_files(gso_root: str, name: str) -> list:
+    files = []
+    for ext in ("png", "jpg", "jpeg"):
+        files += glob.glob(os.path.join(gso_root, name, "**", f"*.{ext}"), recursive=True)
+    # prima i file che contengono "texture" nel nome
+    return sorted(files, key=lambda p: ("texture" not in os.path.basename(p).lower(), p))
+
+
+def _has_image(vis) -> bool:
+    mat = getattr(vis, "material", None)
+    img = getattr(mat, "image", None)
+    if img is None:
+        img = getattr(mat, "baseColorTexture", None)
+    return img is not None
+
+
+def load_textured_aligned(model_dir: str, gso_root: str):
     """
+    Carica la mesh GSO ORIGINALE (con UV e texture) e la porta nel frame del .ply BOP.
+
+    Il .ply BOP (riesportato da trimesh) contiene solo x,y,z: niente UV, niente texture.
+    Quindi geometria+texture vengono dalla mesh GSO in `gso_root/{name}`, mentre il .ply
+    serve solo da riferimento per scala e posizione.
+
+    Ritorna (mesh_allineata, info) con info = dict(kind, rel_std, max_dev, ratios).
+    """
+    name = os.path.basename(os.path.normpath(model_dir))
+
+    # --- riferimento: .ply BOP ---
     ply_path = os.path.join(model_dir, "meshes", "model.ply")
     if not os.path.exists(ply_path):
         raise FileNotFoundError(f"Mesh BOP non trovata: {ply_path}")
-
-    mesh = trimesh.load(ply_path, process=False, force="mesh")
-
-    if mesh.vertices.shape[0] == 0 or mesh.faces.shape[0] == 0:
+    ply = trimesh.load(ply_path, process=False, force="mesh")
+    if ply.vertices.shape[0] == 0 or ply.faces.shape[0] == 0:
         raise ValueError(f"Mesh vuota: {ply_path}")
 
-    return mesh
+    # --- mesh GSO texturizzata ---
+    gso_path = next((os.path.join(gso_root, name, c) for c in GSO_CANDIDATES
+                     if os.path.exists(os.path.join(gso_root, name, c))), None)
+    if gso_path is None:
+        raise FileNotFoundError(f"mesh GSO texturizzata non trovata per {name} in {gso_root}")
+    gso = trimesh.load(gso_path, force="mesh")
+
+    # --- texture: se trimesh non l'ha caricata, la applico a mano ---
+    if not _has_image(gso.visual):
+        uv = getattr(gso.visual, "uv", None)
+        if uv is None:
+            raise RuntimeError(f"{name}: la mesh GSO non ha coordinate UV, non posso applicare la texture")
+        tex_files = _find_texture_files(gso_root, name)
+        if not tex_files:
+            raise FileNotFoundError(f"{name}: nessun file di texture sotto {gso_root}/{name}")
+        img = Image.open(tex_files[0]).convert("RGB")
+        gso.visual = TextureVisuals(uv=uv, material=PBRMaterial(
+            baseColorTexture=img, metallicFactor=0.0, roughnessFactor=1.0, doubleSided=True))
+
+    # --- allineamento: scala uniforme + traslazione centro-bbox -> centro-bbox ---
+    ratios = ply.bounding_box.extents / gso.bounding_box.extents   # una scala per asse
+    s = float(ratios.mean())
+    gso.vertices = (gso.vertices - gso.bounds.mean(0)) * s + ply.bounds.mean(0)
+
+    # --- diagnostica ---
+    rel_std = float(ratios.std() / ratios.mean())                  # ~0 se la scala è davvero uniforme
+    max_dev = float(np.abs(gso.bounds - ply.bounds).max() / np.abs(ply.extents).max())
+    info = dict(kind=gso.visual.kind, rel_std=rel_std, max_dev=max_dev, ratios=ratios)
+
+    if not (info["kind"] == "texture" and rel_std < ALIGN_REL_STD_TOL and max_dev < ALIGN_MAX_DEV_TOL):
+        log.warning(f"[{name}] allineamento sospetto: visual={info['kind']} "
+                    f"rel_std={rel_std:.1e} max_dev={max_dev:.1e} ratios={np.round(ratios, 4)}")
+    return gso, info
 
 
 def fps_torch(x: torch.Tensor, n: int) -> torch.Tensor:
-
     """x: (N,3) -> (n,3). FPS deterministico, tutto su device."""
     idx = torch.zeros(n, dtype=torch.long, device=x.device)
     idx[0] = (x - x.mean(0)).norm(dim=-1).argmax()      # start deterministico: punto più lontano dal centroide
@@ -53,6 +110,7 @@ def fps_torch(x: torch.Tensor, n: int) -> torch.Tensor:
         idx[i] = dist.argmax()
         dist = torch.minimum(dist, (x - x[idx[i]]).norm(dim=-1))
     return x[idx]
+
 
 def fibonacci_sphere(n: int, radius: float) -> np.ndarray:
     """n posizioni camera quasi-uniformi su una sfera di raggio `radius`."""
@@ -169,23 +227,40 @@ def extract_dinov2_grid(encoder2d, image_uint8: np.ndarray, device: torch.device
     return tokens.transpose(1, 2).reshape(1, D, Hp, Wp), H_proc, W_proc
 
 
-def process_model(model_dir: str, encoder2d, n_points: int, n_views: int,
-                  cam_radius: float, fov_deg: float, device: torch.device):
+def save_render_debug(out_dir: str, renders: list, ncols: int = 6):
+    """Salva ogni render (uint8 RGB, esattamente quello che vede DINOv2) e un contact sheet."""
+    rdir = os.path.join(out_dir, "renders")
+    os.makedirs(rdir, exist_ok=True)
+    for k, img in enumerate(renders):
+        Image.fromarray(img).save(os.path.join(rdir, f"view_{k:02d}.png"))
 
-    # Load the mesh (ora sempre dal .ply BOP)
-    mesh = load_gso_mesh_bop(model_dir)
+    h, w = renders[0].shape[:2]
+    nrows = (len(renders) + ncols - 1) // ncols
+    sheet = np.full((nrows * h, ncols * w, 3), 255, dtype=np.uint8)
+    for k, img in enumerate(renders):
+        r, c = divmod(k, ncols)
+        sheet[r * h:(r + 1) * h, c * w:(c + 1) * w] = img
+    Image.fromarray(sheet).save(os.path.join(rdir, "contact_sheet.png"))
 
-    # Sample points on the mesh surface and apply FPS to get n_points
+
+def process_model(model_dir: str, gso_root: str, encoder2d, n_points: int, n_views: int,
+                  cam_radius: float, fov_deg: float, device: torch.device,
+                  save_renders_dir: str | None = None):
+
+    # Mesh GSO texturizzata, già allineata al frame del .ply BOP
+    mesh, align_info = load_textured_aligned(model_dir, gso_root)
+
+    # Sample points on the aligned mesh surface and apply FPS to get n_points
     dense_xyz = trimesh.sample.sample_surface(mesh, 20000)[0].astype(np.float32)
     points = fps_torch(torch.from_numpy(dense_xyz).to(device), n_points)
 
-    #compute centroid and scale to normalize points and mesh to canonical frame
+    # compute centroid and scale to normalize points and mesh to canonical frame
     centroid = points.mean(dim=0, keepdim=True)
     points_c = points - centroid
     scale = points_c.norm(dim=-1).max().clamp(min=1e-6)
     points_n = points_c / scale                                 # frame canonico
 
-    mesh_c = mesh.copy()
+    mesh_c = mesh.copy()                                        # copy() mantiene UV e texture
     mesh_c.vertices = (mesh_c.vertices - centroid.cpu().numpy()) / scale.item()
 
     # Compute the intrinsic matrix
@@ -194,9 +269,10 @@ def process_model(model_dir: str, encoder2d, n_points: int, n_views: int,
     K_np = np.array([[f, 0, image_size / 2], [0, f, image_size / 2], [0, 0, 1]], dtype=np.float32)
     K = torch.from_numpy(K_np).to(device)
 
-    # Obtain camera positions on a sphere around the object to render multiple views that cover entirely the object 
+    # Obtain camera positions on a sphere around the object to render multiple views that cover entirely the object
     cam_positions = fibonacci_sphere(n_views, radius=cam_radius)
     view_feats, view_dirs, masks = [], [], []
+    saved_renders = []
 
     for cam_pos in cam_positions:
         # Compute the camera extrinsic matrix (R, trans) using the look_at_RT function
@@ -206,7 +282,8 @@ def process_model(model_dir: str, encoder2d, n_points: int, n_views: int,
         # Render the view of the mesh from the camera position and obtain the color and depth images
         color, depth = render_view(mesh_c, R_np, trans_np, K_np, image_size)
         depth_t = torch.from_numpy(depth).to(device)
-
+        if save_renders_dir is not None:
+            saved_renders.append(color.copy())                  # esattamente l'array che va a DINOv2
 
         feat_grid, H_proc, W_proc = extract_dinov2_grid(encoder2d, color, device)
         assert H_proc == image_size and W_proc == image_size, \
@@ -225,11 +302,14 @@ def process_model(model_dir: str, encoder2d, n_points: int, n_views: int,
         view_dirs.append(d.cpu().numpy())
         masks.append(vis.cpu().numpy())
 
+    if save_renders_dir is not None:
+        save_render_debug(save_renders_dir, saved_renders)
+
     return (points_n.cpu().numpy(),
             np.stack(view_feats, axis=1),    # (P, n_views, D)
             np.stack(view_dirs, axis=1),     # (P, n_views, 3)
             np.stack(masks, axis=1),         # (P, n_views)
-            centroid.cpu().numpy(), scale.item())
+            centroid.cpu().numpy(), scale.item(), align_info)
 
 
 def _atomic_save(path: str, arr: np.ndarray):
@@ -263,7 +343,8 @@ def main(cfg: DictConfig):
         p.requires_grad_(False)
     log.info(f"Encoder2d (DINOv2) caricato per il precompute, token={encoder2d.token}")
 
-    root = cfg.gso.root   # deve puntare a .../models_bop-renderer_scale=0.1
+    root = cfg.gso.root                 # .../models_bop-renderer_scale=0.1
+    gso_root = "/data/riccardop02/datasets/gso"
     n_points = cfg.gso.get("n_points", 512)
     n_views = cfg.gso.get("n_views", 24)
     cam_radius = cfg.gso.get("cam_radius", 2.5)
@@ -271,6 +352,7 @@ def main(cfg: DictConfig):
     aggregator_dirname = cfg.gso.get("aggregator_dirname", "3DEmbedd")
     overwrite = cfg.gso.get("overwrite", True)   # False: salta i modelli già completati
     save_fp16 = cfg.gso.get("save_fp16", False)   # True: view_feats in float16 (metà spazio)
+    save_renders = cfg.gso.get("save_renders", False)   # True: salva le PNG dei render per debug
 
     # look at the available model
     model_dirs = sorted(d for d in os.listdir(root) if os.path.isdir(os.path.join(root, d)))
@@ -288,16 +370,17 @@ def main(cfg: DictConfig):
             continue
 
         try:
-
             # Compute the 3D context features
-            points, view_feats, view_dirs, mask, centroid, scale = process_model(
-                model_dir, encoder2d, n_points, n_views, cam_radius, fov_deg, device
+            points, view_feats, view_dirs, mask, centroid, scale, align_info = process_model(
+                model_dir, gso_root, encoder2d, n_points, n_views, cam_radius, fov_deg, device,
+                save_renders_dir=out_dir if save_renders else None,
             )
-            #save it as npy
+            # save it as npy
             save_aggregator_context(out_dir, points, view_feats, view_dirs, mask, centroid, scale,
                                     fp16=save_fp16)
             log.info(f"[OK]   {name}: points={points.shape} view_feats={view_feats.shape} "
-                     f"vis_media={mask.mean():.2f} -> {out_dir}")
+                     f"vis_media={mask.mean():.2f} visual={align_info['kind']} "
+                     f"rel_std={align_info['rel_std']:.1e} max_dev={align_info['max_dev']:.1e} -> {out_dir}")
             n_ok += 1
         except Exception:
             log.exception(f"[FAIL] {name}")
