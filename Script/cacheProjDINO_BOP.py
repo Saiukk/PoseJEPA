@@ -1,5 +1,6 @@
 import os
 os.environ.setdefault("PYOPENGL_PLATFORM", "egl")
+os.environ["HYDRA_FULL_ERROR"] = "1"  # per debug completo di hydra
 import sys
 import glob
 import logging
@@ -142,7 +143,7 @@ def look_at_RT(cam_pos: np.ndarray, target: np.ndarray = np.zeros(3),
 def render_view(mesh: trimesh.Trimesh, R: np.ndarray, trans: np.ndarray,
                 K: np.ndarray, image_size: int):
     """Colore + depth con pyrender. Camera->world costruita invertendo (R, trans)."""
-    scene = pyrender.Scene(bg_color=[1.0, 1.0, 1.0, 0.0], ambient_light=[0.6, 0.6, 0.6])
+    scene = pyrender.Scene(bg_color=[0.0, 0.0, 0.0, 1.0], ambient_light=[0.6, 0.6, 0.6])
     scene.add(pyrender.Mesh.from_trimesh(mesh, smooth=False))
 
     cam_pos = -R.T @ trans
@@ -351,7 +352,7 @@ def main(cfg: DictConfig):
     fov_deg = cfg.gso.get("fov_deg", 40.0)
     aggregator_dirname = cfg.gso.get("aggregator_dirname", "3DEmbedd")
     overwrite = cfg.gso.get("overwrite", True)   # False: salta i modelli già completati
-    save_fp16 = cfg.gso.get("save_fp16", False)   # True: view_feats in float16 (metà spazio)
+    save_fp16 = cfg.gso.get("save_fp16", True)   # True: view_feats in float16 (metà spazio)
     save_renders = cfg.gso.get("save_renders", False)   # True: salva le PNG dei render per debug
 
     # look at the available model

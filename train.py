@@ -9,7 +9,7 @@ GPU = "1"
 os.environ["EGL_DEVICE_ID"] = GPU  
 os.environ["CUDA_VISIBLE_DEVICES"] = GPU
 os.environ["HYDRA_FULL_ERROR"] = "1" # Debug
-os.environ["PYOPENGL_PLATFORM"] = "egl"      # Rendering Option (MAYBE EGL one time)
+os.environ["PYOPENGL_PLATFORM"] = "egl"      # Rendering Option 
 
 
 @hydra.main(version_base=None, config_path="configs", config_name="config")

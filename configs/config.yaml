@@ -1,5 +1,5 @@
 defaults:
-  - encoder2d: dinov2
+  - encoder2d: dinov3
   - encoder3d: aggregator
   - Predictor: predictor
   - data: dataset

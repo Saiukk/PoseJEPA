@@ -537,7 +537,7 @@ class Engine:
         }
 
     @staticmethod
-    def _generate_rays(K, R, trans, centroid, scale, grid_size=16, patch_size=14):
+    def _generate_rays(K, R, trans, centroid, scale, grid_size=16, patch_size=16):
         """
         Plucker rays, normalized by centroid and scale of the 3D model.
         """
@@ -602,7 +602,7 @@ class Engine:
         # Raggi in fp32: sotto autocast bmm girerebbe in fp16 e la posa perderebbe precisione
         with torch.autocast(device_type="cuda", enabled=False):
             ray_dirs, ray_moments = self._generate_rays(
-                K, R_mat, trans, centroid, scale, grid_size=16, patch_size=14
+                K, R_mat, trans, centroid, scale, grid_size=16, patch_size=16
             )
 
         # Aggregator (o contesto cached). NON dentro no_grad: serve il gradiente
