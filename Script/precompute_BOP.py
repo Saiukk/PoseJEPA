@@ -21,8 +21,8 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 log = logging.getLogger(__name__)
 
 # default per LM-O (sovrascrivibili da riga di comando con +bop.models_dir=... +bop.out_dir=...)
-DEFAULT_MODELS_DIR = "/data/riccardop02/datasets/lmo/models"
-DEFAULT_OUT_DIR = "/data/riccardop02/datasets/lmo/assets3d"
+DEFAULT_MODELS_DIR = "/data/riccardop02/datasets/ycbv/models"
+DEFAULT_OUT_DIR = "/data/riccardop02/datasets/ycbv/assets3d"
 
 
 def load_bop_mesh(ply_path: str):
@@ -289,14 +289,14 @@ def main(cfg: DictConfig):
     n_views = cfg.gso.get("n_views", 24)
     cam_radius = cfg.gso.get("cam_radius", 2.5)
     fov_deg = cfg.gso.get("fov_deg", 40.0)
-    aggregator_dirname = cfg.gso.get("aggregator_dirname", "3DEmbedd")
+    aggregator_dirname = cfg.gso.get("aggregator_dirname", "3DEmbedd_v3")
     save_fp16 = cfg.gso.get("save_fp16", True)
 
     # parametri BOP (override: +bop.models_dir=... +bop.out_dir=...)
     bop = cfg.get("bop", None) or {}
     models_dir = bop.get("models_dir", DEFAULT_MODELS_DIR)
     out_root = bop.get("out_dir", DEFAULT_OUT_DIR)
-    overwrite = bop.get("overwrite", False)             # False: salta gli oggetti già completati
+    overwrite = bop.get("overwrite", True)             # False: salta gli oggetti già completati
     save_renders = bop.get("save_renders", True)        # PNG dei render per controllo visivo
 
     ply_files = sorted(glob.glob(os.path.join(models_dir, "obj_*.ply")))

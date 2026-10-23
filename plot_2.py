@@ -1,5 +1,8 @@
 import os
 os.environ.setdefault("PYOPENGL_PLATFORM", "egl")
+GPU = "1"
+os.environ["CUDA_VISIBLE_DEVICES"] = GPU
+os.environ["EGL_DEVICE_ID"] = GPU
 import argparse
 import json
 
@@ -108,12 +111,9 @@ def _get_det_mask(tr, H, W):
     return full
 
 
-# ---------------------------------------------------------------------------
-# Disegna una detection dentro una Figure o SubFigure
-#   - una riga per ogni K: overlay ai vari passi di refinement
-#   - una riga finale: grafici con tutte le K insieme
-# ---------------------------------------------------------------------------
-def draw_detection(fig, tr, idx, root, split="test", models_dir=None, use_iou=False, n_steps=5):
+# Draw the result
+def draw_detection(fig, tr, idx, root, split="test", models_dir=None, use_iou=False,
+                   n_steps=5, zoom=False):
     import trimesh
     sid, iid, oid = tr["scene_id"], tr["im_id"], tr["obj_id"]
     E = tr["E"].numpy()                                         # (S+1, K)
@@ -122,6 +122,7 @@ def draw_detection(fig, tr, idx, root, split="test", models_dir=None, use_iou=Fa
     S, K_hyp = E.shape[0] - 1, E.shape[1]
     all_steps = np.arange(S + 1)
     show_steps = np.unique(np.linspace(0, S, n_steps).round().astype(int))
+    s_best = E.argmin(axis=0)                                   # (K,) step della best per ipotesi
 
     cmap = plt.get_cmap("coolwarm")
     cols = [cmap(k / max(K_hyp - 1, 1)) for k in range(K_hyp)]
@@ -152,21 +153,26 @@ def draw_detection(fig, tr, idx, root, split="test", models_dir=None, use_iou=Fa
             half = 0.9 * float(mesh.extents.max()) * Kc[0, 0] / tg[2]
         else:
             cx, cy, half = W / 2, H / 2, min(W, H) / 2
-        x0, x1, y0, y1 = _clamped_window(cx, cy, half, W, H)
+        if zoom:
+            x0, x1, y0, y1 = _clamped_window(cx, cy, half, W, H)
+        else:
+            x0, x1, y0, y1 = 0, W, 0, H                         # immagine intera, nessuno zoom
 
         # metriche (S+1, K) per i grafici con tutte le K
         metrics = [("energia E", E)]
         if gt is not None:
+            dt = t - tg[None, None, :]                              # (S+1, K, 3) errore con segno
             metrics.append(("errore rotazione [deg]", _rot_err_deg(R, Rg)))
-            metrics.append(("errore traslazione [mm]",
-                            np.linalg.norm(t - tg[None, None, :], axis=-1)))
-            metrics.append(("errore profondita' tz [mm]", np.abs(t[..., 2] - tg[2])))
+            metrics.append(("errore traslazione |t| [mm]", np.linalg.norm(dt, axis=-1)))
+            metrics.append(("errore x [mm] (stima - GT)", dt[..., 0]))
+            metrics.append(("errore y [mm] (stima - GT)", dt[..., 1]))
+            metrics.append(("errore z [mm] (stima - GT)", dt[..., 2]))
             if use_iou:
                 iou = np.array([[_iou(render(mesh, Kc, R[s, k], t[s, k]), gt_mask)
                                  for k in range(K_hyp)] for s in all_steps])
                 metrics.append(("IoU maschera con GT", iou))
 
-        n_img_cols = 1 + len(show_steps)
+        n_img_cols = 1 + len(show_steps) + 1                        # originale + passi + BEST
         outer = fig.add_gridspec(K_hyp + 1, 1,
                                  height_ratios=[1.0] * K_hyp + [1.3],
                                  hspace=0.35, top=0.95, bottom=0.04, left=0.04, right=0.98)
@@ -176,7 +182,7 @@ def draw_detection(fig, tr, idx, root, split="test", models_dir=None, use_iou=Fa
             ax.set_ylim(y1, y0)
             ax.set_xticks([]); ax.set_yticks([])
 
-        # --- una riga per ogni K: originale+GT+maschera detection, poi overlay ai passi ---
+        # --- una riga per ogni K: originale+GT+maschera detection, passi, best ---
         for k in range(K_hyp):
             gs_row = outer[k].subgridspec(1, n_img_cols, wspace=0.04)
             ax = fig.add_subplot(gs_row[0, 0])
@@ -196,20 +202,46 @@ def draw_detection(fig, tr, idx, root, split="test", models_dir=None, use_iou=Fa
                 _contour(ax, m, cols[k], lw=1.8)
                 _contour(ax, gt_mask, "lime", lw=1.2, ls="dashed", halo=False)
                 setup_img(ax)
-                ax.set_title(f"passo {s} | tz={t[s, k, 2]:.0f}\nE={E[s, k]:.4f}", fontsize=7)
+
+                title_step = f"passo {s} | tz={t[s, k, 2]:.0f}\nE={E[s, k]:.4f}"
+                if Rg is not None and tg is not None:
+                    rot_err = _rot_err_deg(R[s, k], Rg)
+                    t_err = np.linalg.norm(t[s, k] - tg)
+                    title_step += f"\nrot={rot_err:.1f}° | t_err={t_err:.1f}mm"
+                ax.set_title(title_step, fontsize=7)
+
+                
+
+            # ultima colonna: la BEST (step con E minima per questa ipotesi)
+            sb = int(s_best[k])
+            ax = fig.add_subplot(gs_row[0, n_img_cols - 1])
+            ax.imshow(img)
+            m = render(mesh, Kc, R[sb, k], t[sb, k])
+            _fill(ax, m, cols[k], alpha=0.35)
+            _contour(ax, m, "white", lw=2.2)
+            _contour(ax, gt_mask, "lime", lw=1.2, ls="dashed", halo=False)
+            setup_img(ax)
+            title = f"BEST (passo {sb}) | tz={t[sb, k, 2]:.0f}\nE={E[sb, k]:.4f}"
+            if Rg is not None:
+                title += f"\nrot={_rot_err_deg(R[sb, k], Rg):.1f}°"
+            ax.set_title(title, fontsize=7, fontweight="bold")
 
         # --- grafici con tutte le K insieme ---
-        gs_plt = outer[K_hyp].subgridspec(1, len(metrics), wspace=0.3)
+        gs_plt = outer[K_hyp].subgridspec(1, len(metrics), wspace=0.35)
         for i, (lab, M) in enumerate(metrics):
             ax = fig.add_subplot(gs_plt[0, i])
             for k in range(K_hyp):
                 ax.plot(all_steps, M[:, k], color=cols[k], label=names[k])
+                ax.plot(s_best[k], M[s_best[k], k], marker="*", ms=10,
+                        color=cols[k], mec="black", zorder=5)       # stella = best
             for s in show_steps:                       # segna i passi mostrati sopra
                 ax.axvline(s, color="gray", alpha=0.25, lw=0.8)
-            ax.set_ylabel(lab, fontsize=9)
+            ax.set_ylabel(lab, fontsize=8)
+            if "(stima - GT)" in lab:                  # linea dello zero per gli errori con segno
+                ax.axhline(0, color="black", ls="--", lw=0.8)
             ax.set_xlabel("passo di refinement", fontsize=8)
             ax.grid(alpha=0.3)
-            ax.tick_params(labelsize=8)
+            ax.tick_params(labelsize=7)
             if i == 0:
                 ax.legend(fontsize=6)
 
@@ -218,11 +250,7 @@ def draw_detection(fig, tr, idx, root, split="test", models_dir=None, use_iou=Fa
     finally:
         render.close()
 
-
-# ---------------------------------------------------------------------------
-# UNA SOLA immagine con tutte le detection impilate
-# ---------------------------------------------------------------------------
-def plot_all(traces, root, idxs, out_path, split, models_dir, use_iou, n_steps):
+def plot_all(traces, root, idxs, out_path, split, models_dir, use_iou, n_steps, zoom=False):
     idxs = [i for i in idxs if i in traces]
     if not idxs:
         print("nessun idx valido")
@@ -230,11 +258,11 @@ def plot_all(traces, root, idxs, out_path, split, models_dir, use_iou, n_steps):
     K_hyp = traces[idxs[0]]["E"].shape[1]
     n = len(idxs)
     h_det = 2.4 * K_hyp + 3.6                        # altezza di un blocco-detection
-    fig = plt.figure(figsize=(2.6 * (n_steps + 1), h_det * n))
+    fig = plt.figure(figsize=(2.6 * (n_steps + 2), h_det * n))   # +1 colonna per la best
     subfigs = np.atleast_1d(fig.subfigures(n, 1, hspace=0.02))
     for sf, idx in zip(subfigs, idxs):
         try:
-            draw_detection(sf, traces[idx], idx, root, split, models_dir, use_iou, n_steps)
+            draw_detection(sf, traces[idx], idx, root, split, models_dir, use_iou, n_steps, zoom)
         except Exception as e:
             sf.suptitle(f"idx {idx} fallito: {e!r}", color="red", fontsize=9)
             print(f"idx {idx} fallito: {e!r}")
@@ -246,17 +274,19 @@ def plot_all(traces, root, idxs, out_path, split, models_dir, use_iou, n_steps):
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--traces", default='/experiments/riccardop02/Inference/traces.pt')
-    ap.add_argument("--out", default="plot_all.png", help="nome del file di output")
+    ap.add_argument("--out", default="try.png", help="nome del file di output")
     ap.add_argument("--root", default="/data/riccardop02/datasets/ycbv")
     ap.add_argument("--split", default="test")
     ap.add_argument("--models_dir", default=None)
-    ap.add_argument("--idx", type=int, nargs="+", default=[7145], help="uno o piu' indici")
-    ap.add_argument("--n_obj", type=int, default=10, help="campione casuale di N detection")
+    ap.add_argument("--idx", type=int, nargs="+", default=None, help="uno o piu' indici")
+    ap.add_argument("--n_obj", type=int, default=30, help="campione casuale di N detection")
     ap.add_argument("--all", action="store_true", help="tutte le detection (immagine enorme)")
     ap.add_argument("--n_steps", type=int, default=5,
                     help="quanti passi di refinement mostrare negli overlay (da 0 a S)")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--iou", action="store_true", help="aggiunge grafico IoU con GT (piu' lento)")
+    ap.add_argument("--zoom", action="store_true",
+                    help="zoom attorno all'oggetto (default: immagine intera)")
     a = ap.parse_args()
 
     traces = torch.load(a.traces, weights_only=False)
@@ -271,4 +301,4 @@ if __name__ == "__main__":
                                                       replace=False))]
 
     out_path = os.path.join(os.path.dirname(a.traces), a.out)
-    plot_all(traces, a.root, idxs, out_path, a.split, a.models_dir, a.iou, a.n_steps)
+    plot_all(traces, a.root, idxs, out_path, a.split, a.models_dir, a.iou, a.n_steps, a.zoom)

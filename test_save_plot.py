@@ -9,7 +9,7 @@ from datetime import datetime
 from tqdm import tqdm
 import os, sys, subprocess
 
-os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 import cv2
 import hydra
 import numpy as np
@@ -545,7 +545,7 @@ def load_cfg(config_path, config_name, overrides):
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--root", default="/data/riccardop02/datasets/ycbv", help="cartella del dataset BOP (es. .../lmo)")
-    p.add_argument("--cnos", default="/data/riccardop02/detection/cnos/cnos-fastsam_ycbv-test_f4f2127c-6f59-447c-95b3-28e1e591f1a1.json", help="JSON delle detection CNOS")
+    p.add_argument("--cnos", default="/data/riccardop02/detection/gt/gt_ycbv-test.json", help="JSON delle detection CNOS")
     p.add_argument("--out", default="/experiments/riccardop02/Inference", help="output directory")
     p.add_argument("--split", default="test")
     p.add_argument("--targets", default=None, help="default: <root>/test_targets_bop19.json")
@@ -556,14 +556,14 @@ def main():
     p.add_argument("--overrides", nargs="*", default=[], help="override hydra, es. device=cuda:0")
     p.add_argument("--amp", action="store_true", default=True, help="fp16 autocast")
     p.add_argument("--device", default="cuda")
-    p.add_argument("--min_score", type=float, default=0.3)
+    p.add_argument("--min_score", type=float, default=0)
     p.add_argument("--det_per_target", type=int, default=0,
                    help="tiene le prime inst_count*det_per_target detection per (scene,im,obj); 0 = tutte quelle nei target")
     p.add_argument("--crop_ratio", type=float, default=1.2, help="stesso crop_ratio del training")
     p.add_argument("--N", type=int, default=128, help="Initial Hypothesis")
     p.add_argument("--topk", type=int, default=3)
     p.add_argument("--chunk", type=int, default=32)
-    p.add_argument("--steps", type=int, default=200)
+    p.add_argument("--steps", type=int, default=150)
     p.add_argument("--lr_t", type=float, default=2.0) #2
     p.add_argument("--lr_R", type=float, default=0.03) #0.03
     p.add_argument("--batch_size", type=int, default=64)
@@ -575,7 +575,7 @@ def main():
                    help="save trajectory")
     p.add_argument("--trace_n", type=int, default=300, help="how many detection")
     p.add_argument("--trace_k", type=int, default=6, help="sparse hypothesis")
-    p.add_argument("--trace_out", default=None, help="file .pt di output (default: <out>/traces.pt)")
+    p.add_argument("--trace_out", default='/experiments/riccardop02/Inference/Test_Det/traces.pt', help="file .pt di output (default: <out>/traces.pt)")
     args = p.parse_args()
 
     torch.manual_seed(args.seed)

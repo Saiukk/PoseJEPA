@@ -386,7 +386,6 @@ def sample_and_score(net, b, grid, chunk):
                    for i in range(0, N, chunk)], dim=1)
     return R, t, E
 
-
 def refine(net, b, R, t, steps, lr_t, lr_R, tol=1e-5, patience=20,
            lr_end_frac=0.02, min_frac=0.5):
     R = R.detach().clone()
@@ -503,11 +502,11 @@ def load_cfg(config_path, config_name, overrides):
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--root", default="/data/riccardop02/datasets/ycbv", help="cartella del dataset BOP (es. .../lmo)")
-    p.add_argument("--cnos", default="/data/riccardop02/detection/cnos/cnos-fastsam_ycbv-test_f4f2127c-6f59-447c-95b3-28e1e591f1a1.json", help="JSON delle detection CNOS")
+    p.add_argument("--cnos", default="/data/riccardop02/detection/gt/gt_ycbv-test.json", help="JSON delle detection CNOS")
     p.add_argument("--out", default="/experiments/riccardop02/Inference", help="output directory")
     p.add_argument("--split", default="test")
     p.add_argument("--targets", default=None, help="default: <root>/test_targets_bop19.json")
-    p.add_argument("--ckpt", default="/experiments/riccardop02/outputs/2026-10-09/07-12-11/checkpoints/best.pt", help="checkpoint con i 3 modelli (default: cfg.checkpoint)")
+    p.add_argument("--ckpt", default="/experiments/riccardop02/outputs/2026-10-08 --DINOV3/07-00-35/checkpoints/best.pt", help="checkpoint")
     p.add_argument("--assets_dir", default="/data/riccardop02/datasets/ycbv/assets3d", help="cartella con gli asset 3D per oggetto (vedi EnergyNet._load_assets)")
     p.add_argument("--config_path", default="configs", help="relativo a questo file")
     p.add_argument("--config_name", default="config")
@@ -518,10 +517,10 @@ def main():
     p.add_argument("--det_per_target", type=int, default=0,
                    help="tiene le prime inst_count*det_per_target detection per (scene,im,obj); 0 = tutte quelle nei target")
     p.add_argument("--crop_ratio", type=float, default=1.2, help="stesso crop_ratio del training")
-    p.add_argument("--N", type=int, default=400, help="Initial Hypothesis (rotazioni)")
+    p.add_argument("--N", type=int, default=128, help="Initial Hypothesis")
     p.add_argument("--topk", type=int, default=3)
-    p.add_argument("--chunk", type=int, default=30)
-    p.add_argument("--steps", type=int, default=200)
+    p.add_argument("--chunk", type=int, default=32)
+    p.add_argument("--steps", type=int, default=150)
     p.add_argument("--lr_t", type=float, default=2.0) #2
     p.add_argument("--lr_R", type=float, default=0.03) #0.03
     p.add_argument("--batch_size", type=int, default=64)
@@ -547,7 +546,7 @@ def main():
     if not out.endswith(".csv"):                     
         run_dir = os.path.join(out, datetime.now().strftime("%Y-%m-%d_%H-%M-%S"))
         # Save config (args)
-        run_dir = run_dir + "_" + args.root.split('/')[-1]
+        run_dir = run_dir + "_" + args.root.split('/')[-1] + "_correct_det"
         os.makedirs(run_dir, exist_ok=True)
         with open(os.path.join(run_dir, "config.json"), "w") as f:
             json.dump(args.__dict__, f)

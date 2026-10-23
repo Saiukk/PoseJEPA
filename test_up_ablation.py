@@ -404,7 +404,11 @@ def sample_and_score(net, b, grid, chunk):
     Rg = random_rotations((B, 1), dev)
     R = Rg @ grid[None]                                          # (B,N,3,3)
     # traslazione = GT (per usare quella stimata: b["t0"])
-    t = b["t_gt"][:, None, :].expand(B, N, 3).contiguous()       # (B,N,3)
+    # PER VEDERE Z
+    t0, tg = b["t0"], b["t_gt"]
+    t = t0 * (tg[:, 2:3] / t0[:, 2:3].clamp(min=1e-6))
+    
+    t = tg[:, None, :].expand(B, N, 3).contiguous()       # (B,N,3)  #t0 al posto di t
     E = torch.cat([_energy(net, b, R[:, i:i + chunk], t[:, i:i + chunk])
                    for i in range(0, N, chunk)], dim=1)
     return R, t, E
@@ -534,7 +538,7 @@ def main():
     p.add_argument("--out", default="/experiments/riccardop02/Inference", help="output directory")
     p.add_argument("--split", default="test")
     p.add_argument("--targets", default=None, help="default: <root>/test_targets_bop19.json")
-    p.add_argument("--ckpt", default="/experiments/riccardop02/outputs/2026-10-09/07-12-11/checkpoints/best.pt", help="checkpoint con i 3 modelli")
+    p.add_argument("--ckpt", default="/experiments/riccardop02/outputs/2026-10-09 -- DINOV3/07-12-11/checkpoints/best.pt", help="checkpoint con i 3 modelli")
     p.add_argument("--assets_dir", default="/data/riccardop02/datasets/ycbv/assets3d", help="cartella con gli asset 3D per oggetto")
     p.add_argument("--config_path", default="configs", help="relativo a questo file")
     p.add_argument("--config_name", default="config")
@@ -545,22 +549,22 @@ def main():
     p.add_argument("--det_per_target", type=int, default=0,
                    help="tiene le prime inst_count*det_per_target detection per (scene,im,obj); 0 = tutte")
     p.add_argument("--crop_ratio", type=float, default=1.2, help="stesso crop_ratio del training")
-    p.add_argument("--N", type=int, default=1, help="Initial Hypothesis (rotazioni)")
-    p.add_argument("--topk", type=int, default=1)
+    p.add_argument("--N", type=int, default=128, help="Initial Hypothesis (rotazioni)")
+    p.add_argument("--topk", type=int, default=3)
     p.add_argument("--chunk", type=int, default=32)
-    p.add_argument("--steps", type=int, default=200)
-    p.add_argument("--lr_t", type=float, default=2.0)
-    p.add_argument("--lr_R", type=float, default=0)
+    p.add_argument("--steps", type=int, default=100)
+    p.add_argument("--lr_t", type=float, default=0)
+    p.add_argument("--lr_R", type=float, default=0.03)
     p.add_argument("--batch_size", type=int, default=64)
     p.add_argument("--workers", type=int, default=8)
     p.add_argument("--eval", type=bool, default=True)
-    p.add_argument("--ablation", type=str, default="t")
+    p.add_argument("--ablation", type=str, default="R")
     args = p.parse_args()
 
     assert args.ablation in ['R', 't'], "no Ablation inserted, use R or t"
 
     # Set N = 1 for the Rotation
-    if args.ablation:
+    if args.ablation in ['t']:
         args.N, args.topk = 1, 1
 
     targets = args.targets or f"{args.root}/test_targets_bop19.json"
