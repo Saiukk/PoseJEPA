@@ -52,7 +52,7 @@ class DINOv3(BaseEncoder2D):
 
         print(f"DINOv3: {model_name}, layers={layers}, token={token}, normalize={normalize}, freeze={freeze}, image_size={image_size}")
 
-    @torch.no_grad()
+    #@torch.no_grad()
     def extractFeatures(self, pixel_values: torch.Tensor) -> torch.Tensor:
         """
         Feature di DINOv3. hidden_states[0] = embeddings, hidden_states[L] = uscita del blocco L.

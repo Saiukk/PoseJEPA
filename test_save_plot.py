@@ -549,7 +549,7 @@ def main():
     p.add_argument("--out", default="/experiments/riccardop02/Inference", help="output directory")
     p.add_argument("--split", default="test")
     p.add_argument("--targets", default=None, help="default: <root>/test_targets_bop19.json")
-    p.add_argument("--ckpt", default="/experiments/riccardop02/outputs/2026-10-09 -- DINOV3/07-12-11/checkpoints/best.pt", help="checkpoint con i 3 modelli (default: cfg.checkpoint)")
+    p.add_argument("--ckpt", default="/experiments/riccardop02/outputs/2026-10-26/07-25-30/checkpoints/epoch_0040.pt", help="checkpoint con i 3 modelli (default: cfg.checkpoint)")
     p.add_argument("--assets_dir", default="/data/riccardop02/datasets/ycbv/assets3d", help="cartella con gli asset 3D per oggetto (vedi EnergyNet._load_assets)")
     p.add_argument("--config_path", default="configs", help="relativo a questo file")
     p.add_argument("--config_name", default="config")
@@ -575,7 +575,7 @@ def main():
                    help="save trajectory")
     p.add_argument("--trace_n", type=int, default=300, help="how many detection")
     p.add_argument("--trace_k", type=int, default=6, help="sparse hypothesis")
-    p.add_argument("--trace_out", default='/experiments/riccardop02/Inference/Test_Det/traces.pt', help="file .pt di output (default: <out>/traces.pt)")
+    p.add_argument("--trace_out", default='/experiments/riccardop02/Inference/TestDet_RankLoss/traces.pt', help="file .pt di output (default: <out>/traces.pt)")
     args = p.parse_args()
 
     torch.manual_seed(args.seed)

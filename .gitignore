@@ -16,6 +16,10 @@ tensorboard/
 
 # Temporary files
 prova.py
+test.py
+eval.py
+plot.py
+engine_finetune.py
 
 # Python cache files
 __pycache__/

@@ -273,7 +273,7 @@ def plot_all(traces, root, idxs, out_path, split, models_dir, use_iou, n_steps, 
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("--traces", default='/experiments/riccardop02/Inference/traces.pt')
+    ap.add_argument("--traces", default='/experiments/riccardop02/Inference/TestDet_RankLoss/traces.pt')
     ap.add_argument("--out", default="try.png", help="nome del file di output")
     ap.add_argument("--root", default="/data/riccardop02/datasets/ycbv")
     ap.add_argument("--split", default="test")
