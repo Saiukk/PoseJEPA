@@ -21,8 +21,8 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 log = logging.getLogger(__name__)
 
 # default per LM-O (sovrascrivibili da riga di comando con +bop.models_dir=... +bop.out_dir=...)
-DEFAULT_MODELS_DIR = "/data/riccardop02/datasets/icbin/models"
-DEFAULT_OUT_DIR = "/data/riccardop02/datasets/icbin/assets3d"
+DEFAULT_MODELS_DIR = "/data/riccardop02/datasets/tudl/models"
+DEFAULT_OUT_DIR = "/data/riccardop02/datasets/tudl/assets3d"
 
 
 def load_bop_mesh(ply_path: str):

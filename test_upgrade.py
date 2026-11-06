@@ -153,7 +153,15 @@ class CnosDetDataset(Dataset):
         img = self._read_image(base, iid)
         cam = self._cam(sid)[str(iid)]
         K = np.array(cam["cam_K"], dtype=np.float32).reshape(3, 3)
-        depth = cv2.imread(f"{base}/depth/{iid:06d}.png", cv2.IMREAD_UNCHANGED)
+        depth = None
+
+        for ext in (".png", ".tif", ".tiff"):
+            depth_path = f"{base}/depth/{iid:06d}{ext}"
+
+            if os.path.isfile(depth_path):
+                depth = cv2.imread(depth_path, cv2.IMREAD_UNCHANGED)
+                if depth is not None:
+                    break
         depth = depth.astype(np.float32) * cam.get("depth_scale", 1.0)
 
         rle = dict(d["segmentation"])
@@ -501,13 +509,13 @@ def load_cfg(config_path, config_name, overrides):
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--root", default="/data/riccardop02/datasets/icbin")
-    p.add_argument("--cnos", default="/data/riccardop02/detection/others/ff3d_icbin-test_7e0d0534-d838-4950-a7c7-5705d8ed60a9.json")
+    p.add_argument("--root", default="/data/riccardop02/datasets/lmo")
+    p.add_argument("--cnos", default="/data/riccardop02/detection/gt/gt_lmo-test.json")
     p.add_argument("--out", default="/experiments/riccardop02/Inference")
     p.add_argument("--split", default="test")
     p.add_argument("--targets", default=None)
-    p.add_argument("--ckpt", default="/experiments/riccardop02/outputs/2026-10-08 --DINOV3/07-00-35/checkpoints/best.pt")
-    p.add_argument("--assets_dir", default="/data/riccardop02/datasets/icbin/assets3d")
+    p.add_argument("--ckpt", default="/experiments/riccardop02/outputs/2026-11-04/10-40-44/checkpoints/best.pt")
+    p.add_argument("--assets_dir", default="/data/riccardop02/datasets/lmo/assets3d")
     p.add_argument("--config_path", default="configs")
     p.add_argument("--config_name", default="config")
     p.add_argument("--overrides", nargs="*", default=[])
@@ -538,7 +546,7 @@ def main():
     out = args.out
     if not out.endswith(".csv"):
         run_dir = os.path.join(out, datetime.now().strftime("%Y-%m-%d_%H-%M-%S"))
-        run_dir = run_dir + "_" + args.root.split('/')[-1] + "_best_det"
+        run_dir = run_dir + "_" + args.root.split('/')[-1] + "_prova"
         os.makedirs(run_dir, exist_ok=True)
         with open(os.path.join(run_dir, "config.json"), "w") as f:
             json.dump(args.__dict__, f)

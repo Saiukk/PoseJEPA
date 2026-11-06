@@ -2,7 +2,7 @@ defaults:
   - encoder2d: dinov3
   - encoder3d: aggregator
   - Predictor: predictor
-  - data: dataset_HF
+  - data: dataset_HF_REF
   - train: train
   - wandb: wandb
   - _self_

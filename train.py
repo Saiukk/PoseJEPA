@@ -1,7 +1,7 @@
 import hydra
 from omegaconf import DictConfig
 
-from src.engine_finetune import Engine
+from src.engine_masked import Engine
 import os
 
 GPU = "1"

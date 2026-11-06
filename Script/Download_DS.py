@@ -4,7 +4,7 @@ from huggingface_hub import snapshot_download
 
 os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
 
-NAME = "hb"
+NAME = "itodd"
 
 print(f"download of {NAME} ...")
 
@@ -17,7 +17,8 @@ snapshot_download(
             # "*base.zip", 
             # "*models*.zip", 
             # "*test*.zip"
-            "hb_val_pri*"
+            "*val*.zip"
+           
         ]
 )
 

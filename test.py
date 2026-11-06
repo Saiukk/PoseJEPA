@@ -5,10 +5,12 @@ import os
 import time
 from collections import defaultdict
 from datetime import datetime
+import json
 
 from tqdm import tqdm
+import os, sys, subprocess
 
-os.environ["CUDA_VISIBLE_DEVICES"] = "1"
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 import cv2
 import hydra
 import numpy as np
@@ -24,6 +26,8 @@ from torch.utils.data import DataLoader, Dataset
 from bop_toolkit_lib import inout
 
 
+
+
 # --------------------------------------------------------------------------
 # SO(3): sampling e mappe
 # --------------------------------------------------------------------------
@@ -37,7 +41,7 @@ def quat_to_mat(q):
     ], dim=-1)
     return R.reshape(*q.shape[:-1], 3, 3)
 
-
+# https://marcalexa.github.io/superfibonacci/
 def super_fibonacci(n, device="cpu"):
     """Uniform sampling in SO3"""
     phi = math.sqrt(2.0)
@@ -60,18 +64,10 @@ def so3_exp(w):
 
 
 # --------------------------------------------------------------------------
-# Dataset: detection CNOS -> crop identico al training
+# Dataset: detection CNOS 
 # --------------------------------------------------------------------------
 class CnosDetDataset(Dataset):
-    """
-    Prepara i dati per l'inference, con lo stesso crop usato nel training
-    (GSOMegaposeDataset): box quadrato dal bbox della MASCHERA, lato =
-    max(w, h) * crop_ratio, coordinate arrotondate, PIL crop + resize
-    (BICUBIC per l'immagine, NEAREST per maschera/depth).
-
-    Le detection vengono filtrate PRIMA dell'inference: si tengono solo quelle
-    che compaiono nei target BOP19 e, per ogni (scene, im, obj), le prime
-    inst_count * det_per_target per score CNOS.
+    """ Dataset for that takes CNOS detection and crops the image, mask and depth identically to training.
     """
 
     def __init__(self, root, cnos_json, targets_json, split="test", crop_size=256,
@@ -97,10 +93,10 @@ class CnosDetDataset(Dataset):
                 ds_ = ds_[:max(inst[k] * det_per_target, 1)]
             sel += ds_
 
-        # ordinato per oggetto: i batch sono (quasi) omogenei -> 1 sola chiamata al predictor
+        # sorting by category id, the predictor has to load the same object only once per batch
         sel.sort(key=lambda d: (d["category_id"], d["scene_id"], d["image_id"]))
         self.dets = sel
-        print(f"detection CNOS: {n_all} -> {len(self.dets)} dopo il filtro sui target", flush=True)
+        print(f"detection CNOS: {n_all} -> {len(self.dets)} after 2 filter applied", flush=True)
 
         self.root, self.split = root, split
         self.size, self.margin, self.min_px = crop_size, margin, min_mask_px
@@ -193,6 +189,7 @@ class CnosDetDataset(Dataset):
         dep_c = np.asarray(
             Image.fromarray(depth).crop(box).resize(dsz, Image.NEAREST))   # mode "F"
 
+        # Update K after crop
         scale_x = self.size / float(xmax - xmin)
         scale_y = self.size / float(ymax - ymin)
         K_c = K.copy()
@@ -214,7 +211,7 @@ class CnosDetDataset(Dataset):
 
 
 # --------------------------------------------------------------------------
-# Rete di energia: encoder2d + aggregator (encoder3d) + predictor
+# same as training for the generation of rays
 # --------------------------------------------------------------------------
 def generate_rays(K, R, trans, centroid, scale, grid_size=16, patch_size=16):
     """ Ray equal to training"""
@@ -261,7 +258,7 @@ class EnergyNet(nn.Module):
         self.img_size = self.GRID * self.PATCH
         self.dev = torch.device(device)
 
-        # costruisce i 3 modelli: aggregator, enc2d e predictor
+        # construct 3 models: aggregator, enc2d e predictor
         enc2d = hydra.utils.instantiate(cfg.encoder2d)
         enc3d = hydra.utils.instantiate(cfg.encoder3d, in_dim=enc2d.output_dim[-1])
         pred = hydra.utils.instantiate(
@@ -271,7 +268,7 @@ class EnergyNet(nn.Module):
         )
         self.encoder2d, self.encoder3d, self.predictor = enc2d, enc3d, pred
 
-        # carica i pesi (prima in modo sicuro; se il ckpt contiene oggetti custom, ripiega)
+        # load the weights from the checkpoint
         try:
             ckpt = torch.load(checkpoint, map_location="cpu", weights_only=True)
         except Exception as e:
@@ -296,7 +293,7 @@ class EnergyNet(nn.Module):
 
     # ---- assets per oggetto -------------------------------------------------
     def _load_assets(self, obj_id):
-        d = os.path.join(self.assets_dir, f"obj_{obj_id:06d}", "3DEmbedd")
+        d = os.path.join(self.assets_dir, f"obj_{obj_id:06d}", "3DEmbedd_v3")
         ld = lambda n: torch.from_numpy(np.load(os.path.join(d, n + ".npy"))).to(self.dev)
         return {"view_feats": ld("view_feats"), "view_dirs": ld("view_dirs"),
                 "view_mask": ld("mask"), "point_xyz": ld("points"),
@@ -383,10 +380,7 @@ def _energy(net, b, R, t):
 
 @torch.no_grad()
 def sample_and_score(net, b, grid, chunk):
-    """grid: (N,3,3) Super-Fibonacci. Per ogni detection: rotazione globale
-    casuale (cambia l'offset della griglia) + stessa traslazione t0 per tutte
-    le ipotesi (come FoundationPose): la traslazione viene corretta solo dal
-    refinement."""
+
     B, N, dev = b["t0"].shape[0], grid.shape[0], grid.device
     Rg = random_rotations((B, 1), dev)
     R = Rg @ grid[None]                                          # (B,N,3,3)
@@ -397,10 +391,6 @@ def sample_and_score(net, b, grid, chunk):
 
 
 def refine(net, b, R, t, steps, lr_t, lr_R):
-    """Adam su t + Adam riemanniano su R (left-trivialization, come nei test):
-    R <- Exp(w) @ R, con w nello spazio tangente, azzerato dopo ogni step.
-    Le ipotesi sono indipendenti (loss = somma), e Adam e' per-elemento,
-    quindi ogni ipotesi evolve come se fosse ottimizzata da sola."""
     R = R.detach().clone()
     t = t.detach().clone().requires_grad_(True)
     w = torch.zeros_like(t, requires_grad=True)                 # (B, K, 3)
@@ -411,7 +401,7 @@ def refine(net, b, R, t, steps, lr_t, lr_R):
         _energy(net, b, so3_exp(w) @ R, t).sum().backward()
         opt.step()
         with torch.no_grad():
-            R = so3_exp(w) @ R                                   # retrazione: resta in SO(3)
+            R = so3_exp(w) @ R                                   
             w.zero_()
     with torch.no_grad():
         E = _energy(net, b, R, t)
@@ -420,18 +410,20 @@ def refine(net, b, R, t, steps, lr_t, lr_R):
 
 def run(net, ds, args):
     dev = args.device
-    # Sampling su R (la traslazione parte da t0 per tutte le ipotesi)
+    # Sampling R with fibonacci
     grid = super_fibonacci(args.N, dev)
+    # Dataloader
     dl = DataLoader(ds, batch_size=args.batch_size, num_workers=args.workers,
                     shuffle=False, pin_memory=True,
                     persistent_workers=args.workers > 0)
 
-    # loop su ogni segmentazione
+    # with each batch of detections.
     out = []
     for b in tqdm(dl, desc="inference"):
         b = {k: v.to(dev, non_blocking=True) for k, v in b.items()}
         net.prepare(b)                                           # target, token mask, contesto 3D
 
+        # Compute rotation translation and energy
         R, t, E = sample_and_score(net, b, grid, args.chunk)
         idx = E.topk(args.topk, dim=1, largest=False).indices
         R = torch.gather(R, 1, idx[..., None, None].expand(-1, -1, 3, 3))
@@ -452,19 +444,21 @@ def run(net, ds, args):
                 "score": float(b["det_score"][j] * torch.exp(-e)),
                 "R": R[ar[j], best[j]].cpu().numpy(),
                 "t": t[ar[j], best[j]].cpu().numpy().reshape(3, 1),
-                "time": -1,                                      # tempo non misurato (BOP richiede lo stesso valore per immagine)
+                "time": -1,                                      
             })
     return out
 
 
 def select_and_save(results, targets_json, out_csv):
-    """Top-inst_count per (scene, im, obj) come richiede BOP19, poi CSV."""
+    # Read the object counts from the targets JSON 
     cnt = {(t["scene_id"], t["im_id"], t["obj_id"]): t["inst_count"]
            for t in json.load(open(targets_json))}
     g = defaultdict(list)
+    # fill g with key the scene_id, im_id, obj_id 
     for r in results:
         g[(r["scene_id"], r["im_id"], r["obj_id"])].append(r)
     final = []
+    # if the key is in cnt put in the final file until the inst_count is reached (after sorting by score)
     for k, hs in g.items():
         if k in cnt:
             hs.sort(key=lambda r: r["score"], reverse=True)
@@ -473,26 +467,25 @@ def select_and_save(results, targets_json, out_csv):
     inout.save_bop_results(out_csv, final)
 
 
+# Load config file
 def load_cfg(config_path, config_name, overrides):
-    """Config hydra del training, caricata con compose() (niente @hydra.main:
-    altrimenti hydra e argparse si contendono sys.argv)."""
     with initialize(version_base=None, config_path=config_path):
         return compose(config_name=config_name, overrides=list(overrides))
 
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--root", default="/data/riccardop02/datasets/lmo", help="cartella del dataset BOP (es. .../lmo)")
-    p.add_argument("--cnos", default="/data/riccardop02/detection/cnos/cnos-fastsam_lmo-test_3cb298ea-e2eb-4713-ae9e-5a7134c5da0f.json", help="JSON delle detection CNOS")
+    p.add_argument("--root", default="/data/riccardop02/datasets/ycbv", help="cartella del dataset BOP (es. .../lmo)")
+    p.add_argument("--cnos", default="/data/riccardop02/detection/cnos/cnos-fastsam_ycbv-test_f4f2127c-6f59-447c-95b3-28e1e591f1a1.json", help="JSON delle detection CNOS")
     p.add_argument("--out", default="/experiments/riccardop02/Inference", help="output directory")
     p.add_argument("--split", default="test")
     p.add_argument("--targets", default=None, help="default: <root>/test_targets_bop19.json")
-    p.add_argument("--ckpt", default="/experiments/riccardop02/outputs/2026-10-09/07-12-11/checkpoints/best.pt", help="checkpoint con i 3 modelli (default: cfg.checkpoint)")
-    p.add_argument("--assets_dir", default="/data/riccardop02/datasets/lmo/assets3d", help="cartella con gli asset 3D per oggetto (vedi EnergyNet._load_assets)")
+    p.add_argument("--ckpt", default="/experiments/riccardop02/outputs/best.pt", help="checkpoint con i 3 modelli (default: cfg.checkpoint)")
+    p.add_argument("--assets_dir", default="/data/riccardop02/datasets/ycbv/assets3d", help="cartella con gli asset 3D per oggetto (vedi EnergyNet._load_assets)")
     p.add_argument("--config_path", default="configs", help="relativo a questo file")
     p.add_argument("--config_name", default="config")
     p.add_argument("--overrides", nargs="*", default=[], help="override hydra, es. device=cuda:0")
-    p.add_argument("--amp", action="store_true", help="fp16 autocast")
+    p.add_argument("--amp", action="store_true", default=True, help="fp16 autocast")
     p.add_argument("--device", default="cuda")
     p.add_argument("--min_score", type=float, default=0.3)
     p.add_argument("--det_per_target", type=int, default=0,
@@ -506,11 +499,14 @@ def main():
     p.add_argument("--lr_R", type=float, default=0.01)
     p.add_argument("--batch_size", type=int, default=64)
     p.add_argument("--workers", type=int, default=8)
+    p.add_argument("--eval", type=bool, default=True)
     args = p.parse_args()
 
     targets = args.targets or f"{args.root}/test_targets_bop19.json"
-
+    
+    # load the config
     cfg = load_cfg(args.config_path, args.config_name, args.overrides)
+
     net = EnergyNet(cfg, args.ckpt, args.assets_dir, device=args.device, amp=args.amp)
 
     ds = CnosDetDataset(args.root, args.cnos, targets, args.split, net.img_size,
@@ -519,14 +515,40 @@ def main():
 
     res = run(net, ds, args)
 
+    # Create output directory and save config, and the results in a CSV file
     out = args.out
     if not out.endswith(".csv"):                     
         run_dir = os.path.join(out, datetime.now().strftime("%Y-%m-%d_%H-%M-%S"))
+        # Save config (args)
+        run_dir = run_dir + "_" + args.root.split('/')[-1]
         os.makedirs(run_dir, exist_ok=True)
+        with open(os.path.join(run_dir, "config.json"), "w") as f:
+            json.dump(args.__dict__, f)
+
+       
         out = os.path.join(run_dir, f"energy_{os.path.basename(args.root.rstrip('/'))}-{args.split}.csv")
-    print(f"salvo i risultati in: {out}", flush=True)
+    print(f"Results saved to: {out}", flush=True)
+    # Construct the CSV file and save the results
     select_and_save(res, targets, out)
 
+
+    #Evaluation with bop
+    if args.eval:
+        out_dir = os.path.dirname(os.path.abspath(out))
+        env = os.environ.copy()
+        env["BOP_PATH"] = os.path.dirname(args.root.rstrip("/"))
+        env["BOP_RESULTS_PATH"] = out_dir
+        env["BOP_EVAL_PATH"] = out_dir
+        env["BOP_OUTPUT_PATH"] = out_dir
+
+        subprocess.run(
+            [sys.executable, "scripts/eval_bop19_pose.py",
+             "--renderer_type", "vispy",
+             "--result_filenames", os.path.basename(out)],
+            cwd= "/home/riccardop02/JEPA/bop_toolkit",
+            env=env,
+            check=True,
+        )
 
 if __name__ == "__main__":
     main()
