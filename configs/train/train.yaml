@@ -3,19 +3,19 @@ loader:
   num_workers: 4
 
 trainer:
-  lr: 1e-4                                # 3e-4
+  lr: 1e-5                                # 3e-4
   weight_decay: 0.05                    # 0.05
-  epochs: 250                        # 500
+  epochs: 500                        # 500
   steps_per_epoch: 700                  # 1200
   val_steps: 150
-  warmup_frac: 0.03
+  warmup_frac: 0.05
   min_lr_ratio: 0.01
   log_every: 1                        # 20
   ckpt_every: 10                      # 5
   val_every: 1
   early_stop_patience: 0
   early_stop_min_delta: 0.0
-  resume: null  # PATH TO CHECHPOINT 
+  resume: /experiments/riccardop02/outputs/2026-11-21/17-23-14/checkpoints/best.pt  # PATH TO CHECHPOINT 
 
 
 trainable_components: [predictor,encoder3d]

@@ -1,5 +1,4 @@
 from __future__ import annotations
-
 import argparse
 import logging
 import math
@@ -7,12 +6,10 @@ import os
 import random
 import sys
 from pathlib import Path
-
-GPU = "1"
-
-os.environ["EGL_DEVICE_ID"] = GPU  
+from tqdm.auto import tqdm
+GPU = "0"
+os.environ["EGL_DEVICE_ID"] = GPU
 os.environ["CUDA_VISIBLE_DEVICES"] = GPU
-
 import hydra
 import numpy as np
 import torch
@@ -23,16 +20,12 @@ from omegaconf import OmegaConf
 from torch.utils.data import DataLoader, IterableDataset
 from pytorch3d.transforms import matrix_to_axis_angle, so3_exp_map
 from data.dataset_HF_REF import GSOMegaposeDataset
-
 try:
     import wandb
 except ImportError:
     wandb = None
-
 LOG = logging.getLogger('posejepa.refiner')
 GRID, PATCH, TOKEN_COUNT = 16, 16, 256
-
-
 # ---------- EXACT sampling convention from the supplied inference ----------
 def quat_to_mat(q: torch.Tensor) -> torch.Tensor:
     q = q / q.norm(dim=-1, keepdim=True).clamp_min(1e-12)
@@ -43,8 +36,6 @@ def quat_to_mat(q: torch.Tensor) -> torch.Tensor:
         2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y),
     ], dim=-1)
     return R.reshape(*q.shape[:-1], 3, 3)
-
-
 def super_fibonacci(n: int, device: torch.device) -> torch.Tensor:
     phi = math.sqrt(2.0)
     psi = 1.533751168755204288118041
@@ -54,19 +45,15 @@ def super_fibonacci(n: int, device: torch.device) -> torch.Tensor:
     q = torch.stack([r * torch.sin(a), r * torch.cos(a),
                      big_r * torch.sin(b), big_r * torch.cos(b)], dim=-1)
     return quat_to_mat(q).float()
-
-
 def global_fibonacci(grid: torch.Tensor, batch_size: int,
-                     generator: torch.Generator | None = None) -> torch.Tensor:
+generator: torch.Generator | None = None) -> torch.Tensor:
     # Inference convention: Rg = random_rotations((B, 1)); R = Rg @ grid[None]
     if generator is None:
         q = torch.randn(batch_size, 1, 4, device=grid.device)
     else:
         q = torch.randn(batch_size, 1, 4, generator=generator).to(grid.device)
     return quat_to_mat(q) @ grid.unsqueeze(0)
-
-
-# ---------- EXACT Pluecker formula from the supplied inference ------------
+    # ---------- EXACT Pluecker formula from the supplied inference ------------
 def generate_rays(K, R, trans, centroid, scale, grid_size=GRID, patch_size=PATCH):
     B = K.shape[0]
     y = torch.arange(grid_size, device=K.device, dtype=torch.float32)
@@ -85,9 +72,7 @@ def generate_rays(K, R, trans, centroid, scale, grid_size=GRID, patch_size=PATCH
     O = -torch.bmm(R_inv, trans_norm.unsqueeze(-1)).squeeze(-1)
     moment = torch.cross(O.unsqueeze(1).expand_as(d_o), d_o, dim=-1)
     return d_o, moment
-
-
-# ---------- FoundationPose-inspired latent architecture -------------------
+    # ---------- FoundationPose-inspired latent architecture -------------------
 class ConvBNReLU(nn.Sequential):
     def __init__(self, c_in, c_out, kernel=3, stride=1):
         super().__init__(
@@ -95,8 +80,6 @@ class ConvBNReLU(nn.Sequential):
             nn.BatchNorm2d(c_out),
             nn.ReLU(inplace=True),
         )
-
-
 class BasicResidualBlock(nn.Module):
     def __init__(self, channels: int):
         super().__init__()
@@ -104,12 +87,9 @@ class BasicResidualBlock(nn.Module):
         self.bn1 = nn.BatchNorm2d(channels)
         self.conv2 = nn.Conv2d(channels, channels, 3, padding=1, bias=False)
         self.bn2 = nn.BatchNorm2d(channels)
-
     def forward(self, x):
         y = F.relu(self.bn1(self.conv1(x)), inplace=True)
         return F.relu(x + self.bn2(self.conv2(y)), inplace=True)
-
-
 def positional_encoding(length: int, channels: int, device, dtype):
     # Classic sinusoidal positional encoding, same conceptual role as FoundationPose.
     position = torch.arange(length, device=device, dtype=torch.float32)[:, None]
@@ -119,11 +99,8 @@ def positional_encoding(length: int, channels: int, device, dtype):
     pe[:, 0::2] = torch.sin(position * div)
     pe[:, 1::2] = torch.cos(position * div)
     return pe.to(dtype=dtype)
-
-
 class LatentRefineNet(nn.Module):
     """Same block/channel counts as official FoundationPose RefineNet.
-
     Its RGB-D encoder starts with 7x7/3x3 stride-2 convolutions; here we instead
     project DINO tokens using 1x1, preserving the 16x16 spatial token grid.
     """
@@ -139,9 +116,9 @@ class LatentRefineNet(nn.Module):
         )
         # Official FoundationPose uses separate Transformer layers per head.
         self.rot_transformer = nn.TransformerEncoderLayer(
-            d_model=512, nhead=4, dim_feedforward=512, batch_first=True)
+        d_model=512, nhead=4, dim_feedforward=512, batch_first=True)
         self.trans_transformer = nn.TransformerEncoderLayer(
-            d_model=512, nhead=4, dim_feedforward=512, batch_first=True)
+        d_model=512, nhead=4, dim_feedforward=512, batch_first=True)
         self.rot_linear = nn.Linear(512, 3)
         self.trans_linear = nn.Linear(512, 3)
         # Identity update at initialization: lets before/after checks be meaningful.
@@ -149,17 +126,15 @@ class LatentRefineNet(nn.Module):
         nn.init.zeros_(self.rot_linear.bias)
         nn.init.zeros_(self.trans_linear.weight)
         nn.init.zeros_(self.trans_linear.bias)
-
     def forward(self, z_pred: torch.Tensor, z_target: torch.Tensor):
         # [batch_of_hypotheses, 256, token_dim]
         if z_pred.shape != z_target.shape or z_pred.shape[1] != TOKEN_COUNT:
             raise ValueError(f'Expected matching [N,{TOKEN_COUNT},C], got '
-                             f'{tuple(z_pred.shape)} vs {tuple(z_target.shape)}')
+f'{tuple(z_pred.shape)} vs {tuple(z_target.shape)}')
         H = W = GRID
         a = z_pred.transpose(1, 2).reshape(-1, z_pred.shape[-1], H, W)
         b = z_target.transpose(1, 2).reshape(-1, z_target.shape[-1], H, W)
         # Shared weights, like encodeA(torch.cat([A,B],dim=0)) in FoundationPose.
-
         ab = self.encodeAB(torch.cat((a, b), dim=1))
         seq = ab.flatten(2).transpose(1, 2)  # [N,64,512]
         seq = seq + positional_encoding(seq.shape[1], 512, seq.device, seq.dtype)[None]
@@ -167,35 +142,26 @@ class LatentRefineNet(nn.Module):
         out_trans = self.trans_linear(self.trans_transformer(seq).mean(dim=1))
         # Output is a normalized delta; no tanh clamp (global rotations up to pi).
         return out_rot, out_trans
-
-
-# ---------- Data validation + inference-aligned translation ----------------
+        # ---------- Data validation + inference-aligned translation ----------------
 def to_device(batch: dict, device: torch.device) -> dict:
     return {k: v.to(device, non_blocking=True) if torch.is_tensor(v) else v
             for k, v in batch.items()}
-
-
 def first_present(batch: dict, names: tuple[str, ...]):
     for name in names:
         if name in batch and torch.is_tensor(batch[name]):
             return batch[name], name
     return None, None
-
-
 def ensure_bhw(x: torch.Tensor, name: str) -> torch.Tensor:
     if x.ndim == 4 and x.shape[1] == 1:
         return x[:, 0]
     if x.ndim == 3:
         return x
     raise ValueError(f'{name} must be [B,H,W] or [B,1,H,W], got {tuple(x.shape)}')
-
-
 def guess_t0_from_observation(batch, args, image_hw):
     """Equivalent to CnosDetDataset.guess_translation in the provided inference.
-
     Finds bbox center (u,v) of the object mask; z=median(depth[mask & depth>0]);
     computes t0=inv(K_crop)@[u,v,1]*z. The depth and mask here MUST both be
-    aligned to the same *cropped* image and the cropped intrinsics K.
+    aligned to the same cropped image and the cropped intrinsics K.
     """
     # Preferred: already stored by an inference-equivalent dataset preprocess.
     t0, t0_name = first_present(batch, ('t0', 'initial_translation', 'trans_init'))
@@ -204,7 +170,6 @@ def guess_t0_from_observation(batch, args, image_hw):
         valid, _ = first_present(batch, ('valid', 't0_valid'))
         valid = valid.reshape(-1).bool() if valid is not None else torch.isfinite(t0).all(-1)
         return t0, valid
-
     depth, depth_name = first_present(batch, ('depth', 'depth_image', 'depth_crop', 'depth_img'))
     mask, mask_name = first_present(batch, ('mask', 'mask_visib', 'object_mask', 'mask_img', 'mask_crop'))
     if depth is None:
@@ -233,7 +198,6 @@ def guess_t0_from_observation(batch, args, image_hw):
         mask = ensure_bhw(mask, mask_name).float()
         if mask.shape[-2:] != (H, W):
             raise ValueError(f'{mask_name} {tuple(mask.shape)} != depth {tuple(depth.shape)}')
-
     K = batch['K'].float()
     if K.shape != (B, 3, 3):
         raise ValueError(f'Expected K crop [B,3,3], got {tuple(K.shape)}')
@@ -241,7 +205,6 @@ def guess_t0_from_observation(batch, args, image_hw):
     if depth_scale is not None:
         depth = depth * depth_scale.reshape(B, 1, 1).float()
     depth = depth * float(args.depth_to_pose_units)
-
     # The original CnosDetDataset min_mask_px=50 (valid observed depth pixels).
     t0 = torch.zeros(B, 3, device=depth.device, dtype=torch.float32)
     valid = torch.zeros(B, device=depth.device, dtype=torch.bool)
@@ -258,34 +221,28 @@ def guess_t0_from_observation(batch, args, image_hw):
         t0[b] = torch.linalg.solve(K[b], torch.stack((uc, vc, uc.new_tensor(1.0)))) * zc
         valid[b] = True
     return t0, valid
-
-
 def rotation_error_deg(Ra: torch.Tensor, Rb: torch.Tensor) -> torch.Tensor:
     relative = Ra @ Rb.transpose(-1, -2)
     tr = relative.diagonal(offset=0, dim1=-2, dim2=-1).sum(-1)
     return torch.acos(((tr - 1.0) / 2.0).clamp(-1.0, 1.0)) * (180.0 / math.pi)
-
-
-# Angle buckets for diagnosing global SO(3) refinement.
-ANGLE_BINS = ((0, 5), (5, 15), (15, 30), (30, 60), (60, 90), (90, 120), (120, 150), (150, 180))
-# ANGLE_BINS = (
-#     (0, 5),
-#     (5, 10),
-#     (10, 15),
-#     (15, 20),
-#     (20, 25),
-#     (25, 45),
-# )
-
+    # Angle buckets for diagnosing global SO(3) refinement.
+#ANGLE_BINS = ((0, 5), (5, 15), (15, 30), (30, 60), (60, 90), (90, 120), (120, 150), (150, 180))
+ANGLE_BINS = (
+    (0, 5),
+    (5, 10),
+    (10, 15),
+    (15, 20),
+    (20, 25),
+    (25, 45),
+)
 class MetricAccumulator:
     def __init__(self):
         self.sums = {}
         self.count = 0
         self.images = 0
-
     @torch.no_grad()
     def add(self, R0, t0, R1, t1, Rgt, tgt, loss_r, loss_t,
-            delta_r=None, delta_t=None):
+    delta_r=None, delta_t=None):
         br = rotation_error_deg(R0.float(), Rgt.float()).flatten()
         ar = rotation_error_deg(R1.float(), Rgt.float()).flatten()
         bt = (t0.float() - tgt.float()).norm(dim=-1).flatten()
@@ -314,7 +271,6 @@ class MetricAccumulator:
             values[f'rot_bin_{label}_improved_sum'] = ((ar < br - 1e-4) & mask).float().sum()
         for k, v in values.items():
             self.sums[k] = self.sums.get(k, 0.0) + float(v.item())
-
     @torch.no_grad()
     def add_oracle(self, before_rot, after_rot, before_trans, after_trans):
         # Inputs [B,N]; take the min ACROSS ALL 128 candidates, not per chunk.
@@ -330,7 +286,6 @@ class MetricAccumulator:
         vals['oracle_rot_improved_frac'] = (after_rot.min(1).values < before_rot.min(1).values - 1e-4).float().sum()
         for k, v in vals.items():
             self.sums[k] = self.sums.get(k, 0.0) + float(v.item())
-
     def result(self):
         if not self.count:
             return {}
@@ -358,9 +313,7 @@ class MetricAccumulator:
         out['hypotheses'] = n
         out['images'] = self.images
         return out
-
-
-# ---------- Trainer ---------------------------------------------------------
+        # ---------- Trainer ---------------------------------------------------------
 class RefinementTrainer:
     def __init__(self, cfg, args):
         self.cfg, self.args = cfg, args
@@ -377,45 +330,41 @@ class RefinementTrainer:
         self._missing_val_warned = False
         self._fixed_val_batches = None
         self.best_val = float("inf")
-
         LOG.info('Building JEPA modules from Hydra...')
         self.encoder2d = hydra.utils.instantiate(cfg.encoder2d).to(self.device)
         self.encoder3d = hydra.utils.instantiate(
-            cfg.encoder3d, in_dim=self.encoder2d.output_dim[-1]).to(self.device)
+        cfg.encoder3d, in_dim=self.encoder2d.output_dim[-1]).to(self.device)
         self.predictor = hydra.utils.instantiate(
-            cfg.Predictor, context_dim=self.encoder3d.output_dim[0][-1],
-            output_dim=self.encoder2d.output_dim[-1]).to(self.device)
+        cfg.Predictor, context_dim=self.encoder3d.output_dim[0][-1],
+output_dim=self.encoder2d.output_dim[-1]).to(self.device)
         self._load_jepa(args.jepa_ckpt)
         for m in (self.encoder2d, self.encoder3d, self.predictor):
             m.eval().requires_grad_(False)
-
         self.refiner = LatentRefineNet(self.encoder2d.output_dim[-1]).to(self.device)
         self.optimizer = torch.optim.AdamW(
-            self.refiner.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+        self.refiner.parameters(), lr=args.lr, weight_decay=args.weight_decay)
         self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-            self.optimizer, T_max=max(1, args.steps), eta_min=args.lr * 0.02)
+        self.optimizer, T_max=max(1, args.steps), eta_min=args.lr * 0.02)
         self.scaler = torch.amp.GradScaler('cuda', enabled=self.amp)
         self.train_loader = self._make_loader('train')
         self.val_loader = self._make_loader('val') if args.val_every > 0 else None
         if args.resume:
             self._load_resume(args.resume)
-
         if args.wandb and wandb is None:
             raise ImportError('wandb is not installed: pip install wandb, or use --no-wandb')
         if args.wandb:
             self.wandb_run = wandb.init(
-                project=args.wandb_project,
-                entity=args.wandb_entity or None,
-                name=args.wandb_name or None,
-                dir=str(self.out_dir),
-                config={**vars(args), 'hydra_cfg': OmegaConf.to_container(cfg, resolve=True)},
-                id=getattr(self, '_wandb_id', None),
-                resume='allow' if getattr(self, '_wandb_id', None) else None,
+            project=args.wandb_project,
+            entity=args.wandb_entity or None,
+            name=args.wandb_name or None,
+            dir=str(self.out_dir),
+            config={**vars(args), 'hydra_cfg': OmegaConf.to_container(cfg, resolve=True)},
+            id=getattr(self, '_wandb_id', None),
+            resume='allow' if getattr(self, '_wandb_id', None) else None,
             )
         LOG.info('Refiner parameters: %d; N=%d; chunk=%d; batch=%d',
                  sum(p.numel() for p in self.refiner.parameters()),
                  args.N, args.chunk, args.batch_size)
-
     def _load_jepa(self, path):
         if not Path(path).is_file():
             raise FileNotFoundError(f'JEPA checkpoint not found: {path}')
@@ -432,15 +381,14 @@ class RefinementTrainer:
                             ('predictor', self.predictor)):
             model.load_state_dict(ckpt['models'][name], strict=True)
             LOG.info('Loaded JEPA module %s', name)
-
     def _make_loader(self, split):
         # Same Hydra data parameters, but force the companion dataset subclass
         # without requiring any YAML edits. All architectures remain Hydra-loaded.
         data_args = OmegaConf.to_container(self.cfg.data, resolve=True)
         data_args.pop('_target_', None)
         data_args.update(dataset_source=str(self.cfg.gso.root), split=split,
-                         out_size=256, patch_size=16,
-                         context_dirname=self.args.context_dirname or data_args.get('context_dirname', '3DEmbedd'))
+        out_size=256, patch_size=16,
+        context_dirname=self.args.context_dirname or data_args.get('context_dirname', '3DEmbedd'))
         ds = GSOMegaposeDataset(**data_args)
         n_shards = len(ds.shard_paths)
         workers = self.args.workers if split == 'train' else self.args.val_workers
@@ -454,7 +402,6 @@ class RefinementTrainer:
             persistent_workers=(split == 'train' and workers > 0),
             prefetch_factor=1 if workers > 0 else None,
         )
-
     @staticmethod
     def _set_epoch(loader, epoch):
         if loader is None:
@@ -464,7 +411,6 @@ class RefinementTrainer:
             ds._epoch_counter.value = epoch
         elif hasattr(ds, 'set_epoch'):
             ds.set_epoch(epoch)
-
     def _load_resume(self, path):
         state = torch.load(path, map_location='cpu', weights_only=False)
         self.refiner.load_state_dict(state['refiner'])
@@ -476,7 +422,6 @@ class RefinementTrainer:
         self._wandb_id = state.get('wandb_run_id')
         self.best_val = state.get('best_val', float("inf"))
         LOG.info('Resumed refiner at global step %d', self.step)
-
     def _save(self, filename):
         path = self.out_dir / filename
         payload = {
@@ -498,7 +443,6 @@ class RefinementTrainer:
         torch.save(payload, tmp)
         os.replace(tmp, path)
         LOG.info('Saved checkpoint %s', path)
-
     def _prepare_batch(self, raw):
         batch = to_device(raw, self.device)
         if 'rot_matrix' not in batch or 'trans' not in batch:
@@ -535,18 +479,17 @@ class RefinementTrainer:
                  gt_t.norm(dim=-1).median().clamp_min(1e-8)).item()
         if ratio > 50.0 or ratio < 0.02:
             raise ValueError(
-                f'Likely depth/GT translation UNIT mismatch: median |t0|/|GT t|={ratio:.5f}. '
+f'Likely depth/GT translation UNIT mismatch: median |t0|/|GT t|={ratio:.5f}. '
                 'Set --depth_to_pose_units, verify depth_scale and the units of GT trans.')
         return batch
-
     @torch.no_grad()
     def _encode_frozen(self, b):
         with torch.autocast(self.device.type, dtype=torch.float16, enabled=self.amp):
             z_target = self.encoder2d(b['_image']).float()
             if all(k in b for k in ('view_feats', 'view_dirs', 'view_mask', 'point_xyz')):
                 ctx_f, ctx_c = self.encoder3d.extractFeatures(
-                    b['view_feats'].float(), b['view_dirs'].float(),
-                    b['view_mask'].bool(), b['point_xyz'].float())
+                b['view_feats'].float(), b['view_dirs'].float(),
+                b['view_mask'].bool(), b['point_xyz'].float())
             elif 'context_3d' in b and 'center_3d' in b:
                 ctx_f, ctx_c = b['context_3d'], b['center_3d']
             else:
@@ -555,7 +498,6 @@ class RefinementTrainer:
         if z_target.ndim != 3 or z_target.shape[1] != TOKEN_COUNT:
             raise ValueError(f'DINO target shape should be [B,256,C], got {tuple(z_target.shape)}')
         return z_target.detach(), ctx_f.detach(), ctx_c.detach()
-
     @torch.no_grad()
     def _predict_chunk(self, b, R, t, ctx_f, ctx_c):
         # R [B,M,3,3], t [B,M,3]. Identical rays and predictor as inference.
@@ -575,7 +517,6 @@ class RefinementTrainer:
                 context_features=ctx_f.repeat_interleave(M, dim=0),
                 context_centers=ctx_c.repeat_interleave(M, dim=0))
         return z_pred.detach()
-
     def _run_batch(self, raw, training: bool, validate_seed: int | None = None):
         b = self._prepare_batch(raw)
         if b is None:
@@ -585,90 +526,87 @@ class RefinementTrainer:
         if validate_seed is not None:
             gen = torch.Generator(device='cpu')
             gen.manual_seed(validate_seed)
-
-                    
-
         gt_R = b['rot_matrix'].reshape(B, 3, 3).float()
+        # Rotation sampling biased toward small errors, with exact GT examples.
+        # Fractions sum to 1.0. R=GT cases teach delta_R=0.
+        # Some of these will also have t=GT, teaching both heads to output zero.
+        N = self.args.N
+        sample_device = 'cpu' if gen is not None else self.device
+        remaining = 1.0 - self.args.rot_gt_fraction
+        fractions = [
+            self.args.rot_gt_fraction,           # exactly 0 degrees
+            remaining * (0.35 / 0.90),          # 0-5 degrees
+            remaining * (0.25 / 0.90),          # 5-15 degrees
+            remaining * (0.20 / 0.90),          # 15-30 degrees
+            remaining * (0.10 / 0.90),          # 30-45 degrees
+        ]
 
-        # max_angle = math.radians(45.0)
+        counts = [int(N * f) for f in fractions[:-1]]
+        counts.append(N - sum(counts))
+        bins = [(0.0, 0.0), (0.0, 5.0), (5.0, 15.0),
+                (15.0, 30.0), (30.0, 45.0)]
+        pieces = []
+        for (lo, hi), count in zip(bins, counts):
+            if count == 0:
+                continue
+            if hi == lo:
+                angles_piece = torch.zeros(B, count, 1, device=sample_device)
+            else:
+                angles_piece = (
+                    lo + (hi - lo) * torch.rand(
+                        B, count, 1, device=sample_device, generator=gen
+                    )
+                ) * (math.pi / 180.0)
+            pieces.append(angles_piece)
+        angles = torch.cat(pieces, dim=1).to(self.device)
+        axes = F.normalize(
+            torch.randn(B, N, 3, device=sample_device, generator=gen), dim=-1
+        ).to(self.device)
+        delta_R = so3_exp_map((axes * angles).reshape(-1, 3)).reshape(B, N, 3, 3)
+        R_all = delta_R @ gt_R[:, None]
 
-        # # Campionamento riproducibile durante la validation
-        # sample_device = 'cpu' if gen is not None else self.device
-
-        # axes = torch.randn(
-        #     B, self.args.N, 3,
-        #     device=sample_device,
-        #     generator=gen,
-        # )
-        # axes = F.normalize(axes, dim=-1)
-
-        # angles = torch.rand(
-        #     B, self.args.N, 1,
-        #     device=sample_device,
-        #     generator=gen,
-        # ) * max_angle
-
-        # axes = axes.to(self.device)
-        # angles = angles.to(self.device)
-
-        # delta_R = so3_exp_map((axes * angles).reshape(-1, 3))
-        # delta_R = delta_R.reshape(B, self.args.N, 3, 3)
-
-        # R_all = delta_R @ gt_R[:, None]
-
+        # The first counts[0] candidate rotations are exactly GT.
+        # A subset is also forced to GT translation after t sampling.
+        n_exact_R = counts[0]
+        n_exact_pose = min(n_exact_R, int(N * self.args.full_gt_fraction))
 
         # ==========================================================
         # TRANSLATION SAMPLING FOR ITERATIVE REFINEMENT
         # ==========================================================
-
         gt_t = b['trans'].reshape(B, 3).float()
         t_base = b['_t0'].reshape(B, 3).float()
-
         N = self.args.N
-
         # Usa lo stesso generatore della validation
         sample_device = 'cpu' if gen is not None else self.device
-
         choice = torch.rand(
             B, N, 1,
             device=sample_device,
             generator=gen,
         )
-
         alpha = torch.rand(
             B, N, 1,
             device=sample_device,
             generator=gen,
         )
-
         noise_dir = torch.randn(
             B, N, 3,
             device=sample_device,
             generator=gen,
         )
         noise_dir = F.normalize(noise_dir, dim=-1)
-
         noise_radius = torch.rand(
             B, N, 1,
             device=sample_device,
             generator=gen,
         )
-
         choice = choice.to(self.device)
         alpha = alpha.to(self.device)
         noise_dir = noise_dir.to(self.device)
         noise_radius = noise_radius.to(self.device)
-
         # Errore iniziale della traslazione
         initial_error = (t_base - gt_t).norm(
-            dim=-1, keepdim=True
+                    dim=-1, keepdim=True
         )[:, None, :]
-
-        # 25% t0 originale
-        # 50% interpolazione tra GT e t0
-        # 20% perturbazioni vicino alla GT
-        #  5% esattamente GT
-
         alpha = torch.where(
             choice < 0.25,
             torch.ones_like(alpha),
@@ -678,7 +616,6 @@ class RefinementTrainer:
                 torch.zeros_like(alpha),
             ),
         )
-
         noise_strength = torch.where(
             choice < 0.25,
             torch.zeros_like(choice),
@@ -692,29 +629,35 @@ class RefinementTrainer:
                 ),
             ),
         )
-
         noise = (
             noise_dir
             * noise_radius
             * initial_error
             * noise_strength
         )
-
         t_all = (
             gt_t[:, None, :]
             + alpha * (t_base - gt_t)[:, None, :]
             + noise
         ).contiguous()
 
-        
-        R_all = global_fibonacci(self.grid, B, generator=gen)
+        # Exact GT pose examples: zero rotation AND zero translation correction.
+        # Avoid in-place changes to tensors needed for autograd; these are inputs.
+        if n_exact_pose:
+            t_all[:, :n_exact_pose] = gt_t[:, None, :]
+
+        # Randomize candidate order so exact GT and near GT are spread over
+        # chunks, instead of collecting the easiest cases in the first chunk.
+        perm = torch.randperm(N, device=sample_device, generator=gen).to(self.device)
+        R_all = R_all[:, perm]
+        t_all = t_all[:, perm]
+        #R_all = global_fibonacci(self.grid, B, generator=gen)
         #t_all = b['_t0'][:, None, :].expand(B, self.args.N, 3).contiguous()
         #gt_R = b['rot_matrix'].reshape(B, 3, 3).float()
         #gt_t = b['trans'].reshape(B, 3).float()
         z_target, ctx_f, ctx_c = self._encode_frozen(b)
         meter = MetricAccumulator()
         oracle_br, oracle_ar, oracle_bt, oracle_at = [], [], [], []
-
         if training:
             self.optimizer.zero_grad(set_to_none=True)
         for start in range(0, self.args.N, self.args.chunk):
@@ -737,9 +680,7 @@ class RefinementTrainer:
             # L2 squared per 3-vector, equally weighted on normalized deltas.
             lrot = (r_norm.float() - rot_gt).square().sum(-1)
             ltrans = (t_norm.float() - trans_gt).square().sum(-1)
-           
             loss = (lrot + self.args.trans_weight * ltrans).sum() / (B * self.args.N)
-            
             if training:
                 self.scaler.scale(loss).backward()
             with torch.no_grad():
@@ -755,16 +696,14 @@ class RefinementTrainer:
                 oracle_ar.append(rotation_error_deg(R1, Rgt))
                 oracle_bt.append((t0 - tgt).norm(dim=-1))
                 oracle_at.append((t1 - tgt).norm(dim=-1))
-
         # Oracle diagnostics: min over ALL N hypotheses for each image.
         # Ground truth is used only for measurement, never to select an inference pose.
         meter.add_oracle(*(torch.cat(v, dim=1) for v in
                            (oracle_br, oracle_ar, oracle_bt, oracle_at)))
-
         if training:
             self.scaler.unscale_(self.optimizer)
             grad_norm = torch.nn.utils.clip_grad_norm_(self.refiner.parameters(),
-                                                       self.args.grad_clip)
+                self.args.grad_clip)
             self.scaler.step(self.optimizer)
             self.scaler.update()
             self.scheduler.step()
@@ -774,7 +713,6 @@ class RefinementTrainer:
         if grad_norm is not None:
             result['grad_norm'] = float(grad_norm.item())
         return result
-
     def _val(self):
         if self.val_loader is None:
             return {}
@@ -796,7 +734,7 @@ class RefinementTrainer:
             for i, raw in enumerate(self._fixed_val_batches):
                 with torch.no_grad():
                     result = self._run_batch(raw, training=False,
-                                             validate_seed=self.args.seed + i)
+                    validate_seed=self.args.seed + i)
                 if result:
                     output.append(result)
         finally:
@@ -823,7 +761,6 @@ class RefinementTrainer:
         result['hypotheses'] = total
         result['images'] = images
         return result
-
     def _log(self, prefix, metrics):
         if not metrics:
             return
@@ -835,14 +772,21 @@ class RefinementTrainer:
                            if k in ('loss', 'rot_before_deg', 'rot_after_deg',
                                     'trans_before_units', 'trans_after_units',
                                     'rot_improved_frac', 'trans_improved_frac')))
-
     def fit(self):
         self._set_epoch(self.train_loader, self.epoch)
         self.refiner.train()
-        # Step zero: identity-initialized heads provide an honest baseline.
+        # Validation iniziale
         if self.step == 0 and self.val_loader is not None:
             self._log('val', self._val())
         it = iter(self.train_loader)
+        pbar = tqdm(
+        total=self.args.steps,
+        initial=self.step,
+        desc="Training Refiner",
+        unit="step",
+        dynamic_ncols=True,
+        smoothing=0.1,
+        )
         try:
             while self.step < self.args.steps:
                 try:
@@ -854,17 +798,37 @@ class RefinementTrainer:
                     try:
                         raw = next(it)
                     except StopIteration as exc:
-                        raise RuntimeError('Training dataset is empty') from exc
+                        raise RuntimeError(
+                            'Training dataset is empty'
+                        ) from exc
                 result = self._run_batch(raw, training=True)
                 if not result:
                     continue
                 self.step += 1
-                if self.step == 1 or self.step % self.args.log_every == 0:
+                # Aggiorna la progress bar
+                pbar.update(1)
+                pbar.set_postfix(
+                loss=f"{result['loss']:.4f}",
+                rot=f"{result['rot_after_deg']:.2f}°",
+                epoch=self.epoch,
+                )
+                if (
+        self.step == 1
+                    or self.step % self.args.log_every == 0
+                ):
                     self._log('train', result)
                     if self.wandb_run:
-                        wandb.log({'train/lr': self.optimizer.param_groups[0]['lr']},
-                                  step=self.step)
-                if self.val_loader is not None and self.step % self.args.val_every == 0:
+                        wandb.log(
+                            {
+                                'train/lr':
+                                    self.optimizer.param_groups[0]['lr']
+                            },
+                            step=self.step,
+                        )
+                if (
+        self.val_loader is not None
+                    and self.step % self.args.val_every == 0
+                ):
                     val = self._val()
                     self._log('val', val)
                     if val and val['loss'] < self.best_val:
@@ -873,28 +837,31 @@ class RefinementTrainer:
                 if self.step % self.args.save_every == 0:
                     self._save('last.pt')
         finally:
+            pbar.close()
             if self.step > 0:
                 self._save('last.pt')
             if self.wandb_run:
                 wandb.finish()
-
-
 def parse_args():
     p = argparse.ArgumentParser(description='Train PoseJEPA latent pose refiner')
     p.add_argument('--config_path', default='configs')
     p.add_argument('--config_name', default='config')
     p.add_argument('--overrides', nargs='*', default=[])
     p.add_argument('--jepa_ckpt', default='/experiments/riccardop02/outputs/2026-11-04/10-40-44/checkpoints/best.pt', help='Full checkpoint containing 3 frozen JEPA models')
-    p.add_argument('--resume', default=None, help='Refiner last.pt from an earlier run')
-    p.add_argument('--out_dir', default='/experiments/riccardop02/outputs/refinement_fibonacci')
+    p.add_argument('--resume', default='/experiments/riccardop02/outputs/refinement_near_gt/last.pt', help='Refiner last.pt from an earlier run')
+    p.add_argument('--out_dir', default='/experiments/riccardop02/outputs/refinement_near_gt')
     p.add_argument('--device', default='cuda:0')
     p.add_argument('--N', type=int, default=128)
+    p.add_argument('--rot_gt_fraction', type=float, default=0.10,
+                   help='Fraction of exact GT rotations (zero delta_R)')
+    p.add_argument('--full_gt_fraction', type=float, default=0.05,
+                   help='Fraction of exact GT poses (both R and t)')
     p.add_argument('--chunk', type=int, default=16, help='Hypotheses per forward; gradient accumulation over N')
     p.add_argument('--batch_size', type=int, default=12, help='Number of images, not hypotheses')
     p.add_argument('--val_batch_size', type=int, default=4)
     p.add_argument('--workers', type=int, default=2)
     p.add_argument('--val_workers', type=int, default=0)
-    p.add_argument('--steps', type=int, default=5000)
+    p.add_argument('--steps', type=int, default=10000)
     p.add_argument('--log_every', type=int, default=5)
     p.add_argument('--val_every', type=int, default=100)
     p.add_argument('--val_batches', type=int, default=4)
@@ -903,34 +870,34 @@ def parse_args():
     p.add_argument('--weight_decay', type=float, default=0.0)
     p.add_argument('--grad_clip', type=float, default=1.0)
     p.add_argument('--rot_normalizer', type=float, default=math.pi,
-                   help='Scale of 3D axis-angle normalized correction (global <=180deg)')
+help='Scale of 3D axis-angle normalized correction (global <=180deg)')
     p.add_argument('--trans_normalizer', type=float, default=100.0,
-                   help='Scale of delta translation in SAME units as dataset trans')
+help='Scale of delta translation in SAME units as dataset trans')
     p.add_argument('--trans_weight', type=float, default=0.1)
     p.add_argument('--min_mask_px', type=int, default=50)
     p.add_argument('--context_dirname', default=None,
-                   help='Context folder within each GSO object; default existing dataset setting (usually 3DEmbedd)')
+help='Context folder within each GSO object; default existing dataset setting (usually 3DEmbedd)')
     p.add_argument('--depth_to_pose_units', type=float, default=1.0,
-                   help='Multiply observed depth by this to match GT trans units')
+help='Multiply observed depth by this to match GT trans units')
     p.add_argument('--allow_token_mask', action='store_true',
-                   help='Approximate t0 bbox using mask_tokens when no pixel-level mask exists')
+help='Approximate t0 bbox using mask_tokens when no pixel-level mask exists')
     p.add_argument('--amp', action=argparse.BooleanOptionalAction, default=True)
     p.add_argument('--wandb', action=argparse.BooleanOptionalAction, default=True)
     p.add_argument('--wandb_project', default='jepa-pose-refiner')
     p.add_argument('--wandb_entity', default=None)
-    p.add_argument('--wandb_name', default='fibonacci-latent-refiner-L2-perturbed_t')
+    p.add_argument('--wandb_name', default='latent-refiner-near-GT-zero-corrections')
     p.add_argument('--seed', type=int, default=42)
     args = p.parse_args()
     if args.N < 1 or args.chunk < 1 or args.steps < 1:
         p.error('N, chunk and steps must be > 0')
+    if not (0 <= args.full_gt_fraction <= args.rot_gt_fraction <= 1.0):
+        p.error('Require 0 <= full_gt_fraction <= rot_gt_fraction <= 1.0')
     if args.rot_normalizer <= 0 or args.trans_normalizer <= 0:
         p.error('rot_normalizer and trans_normalizer must be > 0')
     return args
-
-
 def main():
     logging.basicConfig(level=logging.INFO,
-                        format='%(asctime)s %(levelname)s %(name)s: %(message)s')
+    format='%(asctime)s %(levelname)s %(name)s: %(message)s')
     args = parse_args()
     random.seed(args.seed)
     np.random.seed(args.seed)
@@ -943,9 +910,8 @@ def main():
     with initialize_config_dir(version_base=None, config_dir=config_dir):
         cfg = compose(config_name=args.config_name, overrides=args.overrides)
     LOG.info('Using Hydra config: %s (%s)', config_dir, args.config_name)
-    LOG.info('128 global SO(3) hypotheses')
+    LOG.info('N=%d, rotation GT fraction=%.2f, full GT fraction=%.2f',
+             args.N, args.rot_gt_fraction, args.full_gt_fraction)
     RefinementTrainer(cfg, args).fit()
-
-
 if __name__ == '__main__':
     main()

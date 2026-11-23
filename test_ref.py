@@ -10,7 +10,7 @@ from collections import defaultdict
 from datetime import datetime
 from tqdm import tqdm
 
-os.environ["CUDA_VISIBLE_DEVICES"] = "1"
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
 import cv2
 import hydra
@@ -595,7 +595,7 @@ def main():
     p.add_argument("--split", default="test")
     p.add_argument("--targets", default=None)
     p.add_argument("--ckpt", default="/experiments/riccardop02/outputs/2026-11-04/10-40-44/checkpoints/best.pt")
-    p.add_argument("--refiner_ckpt", default="/experiments/riccardop02/outputs/refinement_perturbed/ref_best.pt")
+    p.add_argument("--refiner_ckpt", default="/experiments/riccardop02/outputs/refinement_near_gt/long_ref_best.pt")
     p.add_argument("--assets_dir", default="/data/riccardop02/datasets/lmo/assets3d")
     p.add_argument("--config_path", default="configs")
     p.add_argument("--config_name", default="config")
@@ -606,9 +606,9 @@ def main():
     p.add_argument("--det_per_target", type=int, default=0)
     p.add_argument("--crop_ratio", type=float, default=1.20)
     p.add_argument("--N", type=int, default=128)
-    p.add_argument("--topk", type=int, default=50)
+    p.add_argument("--topk", type=int, default=5)
     p.add_argument("--chunk", type=int, default=48)
-    p.add_argument("--steps", type=int, default=3)  # neural refinement; reference REFINE_STEPS=2
+    p.add_argument("--steps", type=int, default=4)  # neural refinement; reference REFINE_STEPS=2
     # p.add_argument("--lr_t", type=float, default=2.0) 
     # p.add_argument("--lr_R", type=float, default=0.03) 
     p.add_argument("--batch_size", type=int, default=64)
@@ -629,7 +629,7 @@ def main():
     out = args.out
     if not out.endswith(".csv"):
         run_dir = os.path.join(out, datetime.now().strftime("%Y-%m-%d_%H-%M-%S"))
-        run_dir = run_dir + "_" + args.root.split('/')[-1] + "_prova_ref_K=25"
+        run_dir = run_dir + "_" + args.root.split('/')[-1] + "_REF_LONG_3STEP"
         os.makedirs(run_dir, exist_ok=True)
         with open(os.path.join(run_dir, "config.json"), "w") as f:
             json.dump(args.__dict__, f)

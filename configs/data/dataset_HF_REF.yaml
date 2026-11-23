@@ -2,7 +2,7 @@ _target_: src.data.dataset_HF_REF.GSOMegaposeDataset
 shard_source: "https://huggingface.co/datasets/bop-benchmark/megapose/resolve/main/MegaPose-GSO/shard-{000000..001039}.tar"
 models_json: "https://huggingface.co/datasets/bop-benchmark/megapose/resolve/main/MegaPose-GSO/gso_models.json"
 
-crop_ratio: 1.02
+crop_ratio: 1.20
 patch_size: 16   
 out_size: 256
 mean: [0.485, 0.456, 0.406]
