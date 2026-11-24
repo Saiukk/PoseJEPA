@@ -1,0 +1,19 @@
+_target_: src.data.dataset.GSOMegaposeDataset
+shard_source: https://www.paris.inria.fr/archive_ylabbeprojectsdata/megapose/webdatasets/gso_1M/{00000000..00001049}.tar  #/experiments/riccardop02/exp/mini_gso_10*.tar #  /experiments/riccardop02/exp/mini_gso_50obj_15view.tar       # local path /../*.tar or if remote URL, use https://host/shards/{00000..99000}.tar
+crop_ratio: 1.02
+patch_size: 16   
+out_size: 256
+mean: [0.485, 0.456, 0.406]
+std: [0.229, 0.224, 0.225]
+cache_context: True
+shuffle_buffer: 2000
+visible_frac: 0.5
+
+val_ratio: 0.1
+split_seed: 42     
+
+prefetch_depth: 2
+log_transfer_stats: true  
+visible_frac_start : null
+visible_frac_end : null
+visible_frac_decay_epochs : 0

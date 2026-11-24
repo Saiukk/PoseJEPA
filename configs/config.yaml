@@ -1,0 +1,15 @@
+defaults:
+  - encoder2d: dinov3
+  - encoder3d: aggregator
+  - Predictor: predictor
+  - data: dataset_HF_REF
+  - train: train
+  - wandb: wandb
+  - _self_
+
+hydra:
+  run:
+    dir: /experiments/riccardop02/outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}
+
+gso:
+  root: /data/riccardop02/datasets/gso_MP/google_scanned_objects/models_bop-renderer_scale=0.1

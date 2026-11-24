@@ -1,2 +1,36 @@
-Renders/
 .env
+.vscode/
+
+# Models
+*.pt
+*.pth
+*.ckpt
+
+# Hydra e Logging 
+outputs/
+multirun/
+wandb/
+tensorboard/
+*.log
+
+
+# Temporary files
+prova.py
+test.py
+eval.py
+plot.py
+engine_finetune.py
+
+# Python cache files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Not finish yet or not shared
+checkdata.ipynb
+tar_creation.py
+tar_validation.py
+tar_validation_SM.py
+engine2.py
+computing_symmetry.py

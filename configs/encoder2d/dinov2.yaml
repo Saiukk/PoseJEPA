@@ -1,0 +1,10 @@
+_target_: src.models.encoder2d.DINOv2.DINOv2
+
+# Define other variables..
+model_name: "facebook/dinov2-base"
+layers: [9]
+token: "PatchToken"
+normalize: True
+freeze: True
+
+

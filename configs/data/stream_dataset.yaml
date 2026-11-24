@@ -1,0 +1,12 @@
+_target_: src.data.Stream_Dataset.RenderDatasetStreaming
+
+repo_id: Saiukk/POSEJEPA_Training
+context_mode: "aggregator"
+val_ratio: 0.1
+split_seed: 42
+shuffle_buffer_size: null
+token: null   
+cache_context: false                 # IMPORTANTE: con true ogni worker tiene in RAM tutti gli (P,V,D) da ~38MB
+local_cache_dir: /tmp/shard_cache
+prefetch_depth: 4                    # shard scaricati in parallelo per worker (piu' alto = piu' RAM/disco)
+log_transfer_stats: true

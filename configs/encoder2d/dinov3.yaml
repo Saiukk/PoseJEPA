@@ -1,0 +1,10 @@
+_target_: src.models.encoder2d.DINOv3.DINOv3
+
+# Define other variables.._target_: src.models.encoder2d.DINOv3.DINOv3
+
+model_name: "facebook/dinov3-vitl16-pretrain-lvd1689m"
+layers: [18]
+token: "PatchToken"
+normalize: True
+freeze: True
+image_size: 256
