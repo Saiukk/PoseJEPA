@@ -24,6 +24,8 @@ T* = argmin_{T in SE(3)} D(Phi(M; T), Psi(I))
 
 Here, `M` is the CAD model, `I` is the observed image, `Phi` is the pose-conditioned latent predictor, `Psi` is the target-image encoder, and `D` is a feature discrepancy.
 
+![Architecture](architecture3.png)
+
 ## Method
 
 ### Training
